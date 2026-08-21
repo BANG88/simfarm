@@ -485,6 +485,20 @@ bun start -- --host 0.0.0.0 --providers ios,android,wechat
 There is **no authentication** in v1. Bind to a private interface — a VPN or
 tailnet address, or loopback plus an SSH tunnel — and not to a public one.
 
+Be clear about what that buys. Binding privately, or tunnelling, bounds which
+*machines* can reach the port. It does not bound which *pages* can. The upgrade
+is accepted without an `Origin` check and without credentials, so a page in a
+browser on any machine that can reach the port can open the protocol socket,
+read the device list, attach to a booted device, and send input — the same
+things the shipped client does. Https pages cannot: browsers refuse `ws://`
+from a secure page. Plain-http pages can, and so can anything able to tamper
+with one.
+
+The same follows for the device list: `GET /devices` answers before any
+decision about who is asking, and device names carry app and mini program names.
+
+An `Origin` allowlist on the upgrade is the cheap fix and is not in v1.
+
 ### Omarchy
 
 There is a desktop plugin for [Omarchy](https://omarchy.org) that opens the

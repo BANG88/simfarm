@@ -29,6 +29,8 @@ The meaning of `devices` has not changed, so that anything already reading it do
 - **Binary WebSocket frames only.** Text frames are ignored by the server, which logs a warn.
 - One connection can view several devices at once, distinguished by `streamId` (see §4 attach).
 - v1 has no authentication (ARCHITECTURE.md); it listens only on Tailscale / loopback interfaces.
+  The upgrade is also accepted without an `Origin` check, so where the port is reachable a page in a
+  browser can drive it as freely as the shipped client. See SETUP.md, "From another machine".
 - Once the connection is established the server **pushes one** `devices` event on its own; you do not need to send `list` first.
 
 ---
