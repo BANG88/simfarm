@@ -1,6 +1,6 @@
 {
   "name": "simfarm",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "type": "module",
   "description": "Stream iOS, Android and WeChat mini program simulators over one WebSocket, and drive them from another machine",
