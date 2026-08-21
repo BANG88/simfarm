@@ -1271,6 +1271,8 @@ class WechatHandle implements DeviceHandle {
   private encoder: H264Encoder | null = null;
   private shellConn: WechatShell | null = null;
   private watchdog: NodeJS.Timeout | null = null;
+  private seedPending = false;
+  private encoderRestarts = 0;
   private closed = false;
 
   constructor(
@@ -1330,10 +1332,20 @@ class WechatHandle implements DeviceHandle {
     if (this.sink) throw new Error("video already started");
     this.sink = onFrame;
 
-    // SEED is a JPEG whatever the stream codec is (PROTOCOL §3): it gives the
-    // client a picture immediately instead of waiting out the first IDR.
-    const seed = this.set.latestFrame;
-    if (seed) onFrame(VIDEO_TAG.SEED, seed);
+    /*
+     * SEED is a JPEG whatever the stream codec is (PROTOCOL §3): it gives the
+     * client a picture immediately instead of waiting out the first IDR.
+     *
+     * It must not depend on the encoder, and it must not depend on luck. It used
+     * to be sent only if a frame happened to already be cached — so attaching to
+     * a still page sent no seed at all, and if the encoder then failed the client
+     * had nothing whatsoever to show. That is the state that reads as "the device
+     * is broken" rather than "the video is broken". If nothing is cached yet, the
+     * next frame off CDP becomes the seed, before it goes anywhere near ffmpeg.
+     */
+    const cached = this.set.latestFrame;
+    if (cached) onFrame(VIDEO_TAG.SEED, cached);
+    else this.seedPending = true;
 
     if (codec === "h264") {
       // Bandwidth stops being the constraint here — 20 fps of H.264 measured
@@ -1343,12 +1355,16 @@ class WechatHandle implements DeviceHandle {
       this.startEncoder();
       this.set.onFrame = (data) => {
         if (this.closed) return;
+        this.seedIfPending(data);
         // The size check reads the JPEG, so it has to happen on the way in.
         this.checkScreen(data);
         this.encoder?.push(data);
       };
     } else {
-      this.set.onFrame = (data) => this.emit(VIDEO_TAG.KEY, data);
+      this.set.onFrame = (data) => {
+        this.seedIfPending(data);
+        this.emit(VIDEO_TAG.KEY, data);
+      };
     }
 
     // Page frames appear and vanish as the user navigates; keep up with them.
@@ -1362,6 +1378,13 @@ class WechatHandle implements DeviceHandle {
     this.syncTimer.unref?.();
 
     return () => this.stopVideo();
+  }
+
+  /** The first frame after an attach that had nothing cached to seed with. */
+  private seedIfPending(data: Uint8Array): void {
+    if (!this.seedPending) return;
+    this.seedPending = false;
+    this.sink?.(VIDEO_TAG.SEED, data);
   }
 
   /**
@@ -1379,11 +1402,43 @@ class WechatHandle implements DeviceHandle {
       const enc = this.encoder;
       if (this.closed || !enc) return;
       if (enc.stats.framesOut > 0) return;
+
+      const counts =
+        `${enc.stats.jpegIn} frames in, ${enc.stats.bytesIn} bytes written, ` +
+        `${enc.stats.stdoutBytes} bytes back, ${enc.stats.accessUnits} access units`;
+      /*
+       * ffmpeg's own words. Without them this reports that nothing came out and
+       * leaves the reader to guess why — and the guess is expensive, because
+       * every stage looks individually healthy. ffmpeg is silent at this log
+       * level unless something is wrong, so an empty string here is itself
+       * information: the encoder is not complaining, it is just not producing.
+       */
+      const said = enc.diagnostics;
+      log.warn(`h264 encoder produced nothing in ${ENCODER_WATCHDOG_MS}ms (${counts})`);
+      log.warn(said ? `ffmpeg said: ${said}` : "ffmpeg said nothing on stderr");
+
+      /*
+       * Try once more before giving up. VideoToolbox is a shared, finite
+       * resource on this machine — the same failure has been seen hitting
+       * serve-sim's own encoder at the same moment — so an encoder that
+       * produces nothing is often a transient condition that a fresh session
+       * clears. Only once: a restart loop against a genuinely broken pipeline
+       * would hide the problem instead of reporting it.
+       */
+      if (this.encoderRestarts === 0) {
+        this.encoderRestarts++;
+        log.warn("restarting the h264 encoder once before falling back");
+        this.encoder?.stop();
+        this.encoder = null;
+        this.startEncoder();
+        return;
+      }
+
       this.events.onError?.(
-        `h264 encoder took ${ENCODER_WATCHDOG_MS}ms and produced nothing ` +
-          `(${enc.stats.jpegIn} frames in, ${enc.stats.bytesIn} bytes written, ` +
-          `${enc.stats.stdoutBytes} bytes back, ${enc.stats.accessUnits} access units). ` +
-          `Re-attach with codec "jpeg", or restart the server with --wechat-no-h264.`,
+        `h264 encoder took ${ENCODER_WATCHDOG_MS}ms and produced nothing, twice ` +
+          `(${counts})` +
+          (said ? `. ffmpeg said: ${said}` : ". ffmpeg said nothing on stderr") +
+          `. Re-attach with codec "jpeg", or restart the server with --wechat-no-h264.`,
       );
     }, ENCODER_WATCHDOG_MS);
     timer.unref?.();

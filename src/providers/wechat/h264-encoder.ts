@@ -138,6 +138,19 @@ export class H264Encoder {
   private stderr = "";
 
   /**
+   * Whatever ffmpeg has said on stderr, most recent last.
+   *
+   * Kept rather than logged as it arrives because ffmpeg at `-loglevel error`
+   * is silent when healthy, so this is empty in the normal case and is exactly
+   * the thing worth printing when it is not. It used to be readable only from
+   * the exit handler, which is no help for the failure that actually happens:
+   * ffmpeg alive, swallowing frames, emitting nothing.
+   */
+  get diagnostics(): string {
+    return this.stderr.trim();
+  }
+
+  /**
    * One counter per stage of the pipe. When the client sees nothing, exactly one
    * of these is zero and it says which side of which boundary to look at:
    * nothing written -> the provider never fed us; written but no stdout ->
