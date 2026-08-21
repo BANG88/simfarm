@@ -15,3 +15,4 @@ dist/
 # full of this machine's specifics and the trial and error behind each decision
 # — none of which helps an outside reader. Kept locally, not published.
 STATUS.md
+package.json.packbak

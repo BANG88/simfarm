@@ -163,14 +163,32 @@ Video and input use the [scrcpy](https://github.com/Genymobile/scrcpy) **server*
 protocol directly — simfarm speaks it itself and does not need scrcpy's desktop
 client. The server jar is pushed to the device at connect time.
 
-```bash
-bun run scrcpy:download
+**You do not normally have to do anything.** The jar is fetched on first use,
+with a line in the log saying so, and verified against a pinned SHA-256:
+
+```
+[android] scrcpy-server 4.1 is not present; fetching it once from
+          https://github.com/.../scrcpy-server-v4.1 (~730 KB, verified ...)
+[android] scrcpy-server 4.1 verified (.../vendor/scrcpy-server-v4.1.jar)
 ```
 
-That fetches the pinned release into `vendor/` and **verifies its SHA-256**,
-refusing to keep a download whose digest does not match. Version and digest live
-in [`vendor/scrcpy-server.json`](../vendor/scrcpy-server.json); the jar itself is
-not committed, because a binary in git is a binary nobody re-reads.
+To fetch it ahead of time — building an image, priming a cache, or a machine
+that will not have network when the server first runs:
+
+```bash
+npx simfarm download-scrcpy          # from the package
+bun run scrcpy:download              # from a clone; same thing
+```
+
+The jar is **not** shipped: not in git, because a binary in git is a binary
+nobody re-reads, and not in the npm package, because redistributing someone
+else's release inside ours is not ours to do. Version, URL and digest live in
+[`vendor/scrcpy-server.json`](../vendor/scrcpy-server.json).
+
+The download goes through `curl` rather than Node's `fetch`, deliberately:
+`fetch` ignores `HTTP_PROXY` and `HTTPS_PROXY`, so behind a proxy it does not
+fail — it hangs until the TCP timeout. curl reads the same environment as the
+rest of your machine, and there is a 60-second ceiling either way.
 
 Startup verifies the digest again and **refuses to start** on a mismatch. That
 is deliberate: the scrcpy server protocol is not stable across versions, and
@@ -558,13 +576,20 @@ would answer — the capability list is usually enough:
 curl -s http://127.0.0.1:8801/devices | jq '.devices[] | {id, capabilities}'
 ```
 
-### `bun run scrcpy:download` fails, or Android refuses to start
+### Android fails to start with a scrcpy jar error
 
-A digest mismatch is intentional and fatal: the scrcpy server protocol is not
-stable across versions, so simfarm will not run against a jar it cannot
-identify. Delete `vendor/*.jar` and re-run the download. If the release URL has
-moved, update [`vendor/scrcpy-server.json`](../vendor/scrcpy-server.json) — and
-treat that as a real change, not a version bump.
+The jar is fetched automatically on first use, so this means the fetch itself
+failed. The log says which:
+
+- **A download failure** — no network, or a proxy in the way. Retry explicitly
+  with `npx simfarm download-scrcpy`, which prints the underlying curl error. Or
+  start without the backend: `--providers ios,wechat`.
+- **A digest mismatch** is intentional and fatal, and is never fixed by
+  re-downloading on your behalf: the scrcpy server protocol is not stable across
+  versions, so simfarm will not push a jar it cannot identify to a device.
+  Delete `vendor/*.jar` and fetch again. If the release URL has moved, update
+  [`vendor/scrcpy-server.json`](../vendor/scrcpy-server.json) — and treat that as
+  a real change rather than a version bump.
 
 ### The WeChat simulator stops responding to touches
 

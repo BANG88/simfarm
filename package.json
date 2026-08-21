@@ -1,68 +1,69 @@
 {
-	"name": "simfarm",
-	"version": "0.1.0",
-	"private": false,
-	"type": "module",
-	"description": "Stream iOS, Android and WeChat mini program simulators over one WebSocket, and drive them from another machine",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/BANG88/simfarm.git"
-	},
-	"bugs": {
-		"url": "https://github.com/BANG88/simfarm/issues"
-	},
-	"homepage": "https://github.com/BANG88/simfarm#readme",
-	"keywords": [
-		"ios",
-		"android",
-		"wechat",
-		"miniprogram",
-		"simulator",
-		"emulator",
-		"screen-mirroring",
-		"remote-control",
-		"scrcpy",
-		"websocket",
-		"devtools",
-		"macos"
-	],
-	"os": [
-		"darwin"
-	],
-	"cpu": [
-		"arm64"
-	],
-	"engines": {
-		"node": ">=20"
-	},
-	"packageManager": "bun@1.4.0",
-	"bin": {
-		"simfarm": "dist/main.js"
-	},
-	"files": [
-		"dist/",
-		"web/",
-		"vendor/scrcpy-server.json",
-		"docs/"
-	],
-	"scripts": {
-		"start": "node src/main.ts",
-		"dev": "node --watch src/main.ts",
-		"test": "SIMFARM_LOG=error node --test 'test/**/*.test.ts'",
-		"typecheck": "tsc --noEmit",
-		"scrcpy:download": "node src/providers/android/download-scrcpy-server.ts",
-		"build": "bun tools/build.ts",
-		"prepack": "bun run build"
-	},
-	"dependencies": {
-		"jpeg-js": "^0.4.4",
-		"serve-sim": "^0.1.45",
-		"ws": "^8.21.3"
-	},
-	"devDependencies": {
-		"@types/node": "^24.0.0",
-		"@types/ws": "^8.5.13",
-		"typescript": "^5.9.0"
-	}
+  "name": "simfarm",
+  "version": "0.1.1",
+  "private": false,
+  "type": "module",
+  "description": "Stream iOS, Android and WeChat mini program simulators over one WebSocket, and drive them from another machine",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BANG88/simfarm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BANG88/simfarm/issues"
+  },
+  "homepage": "https://github.com/BANG88/simfarm#readme",
+  "keywords": [
+    "ios",
+    "android",
+    "wechat",
+    "miniprogram",
+    "simulator",
+    "emulator",
+    "screen-mirroring",
+    "remote-control",
+    "scrcpy",
+    "websocket",
+    "devtools",
+    "macos"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "bun@1.4.0",
+  "bin": {
+    "simfarm": "dist/main.js"
+  },
+  "files": [
+    "dist/",
+    "web/",
+    "vendor/scrcpy-server.json",
+    "docs/"
+  ],
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "node --watch src/main.ts",
+    "test": "SIMFARM_LOG=error node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "scrcpy:download": "node src/main.ts download-scrcpy",
+    "build": "bun tools/build.ts",
+    "prepack": "bun run build && node tools/pack-manifest.ts strip",
+    "postpack": "node tools/pack-manifest.ts restore"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4",
+    "serve-sim": "^0.1.45",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.9.0"
+  }
 }

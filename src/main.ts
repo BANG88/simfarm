@@ -104,7 +104,11 @@ function parseArgs(argv: string[]): Args {
         `usage: simfarm [--host HOST] [--port PORT] ` +
           `[--providers ${Object.keys(PROVIDERS).join(",")}]\n` +
           `       [--android-max-size N] [--wechat-max-fps N] [--wechat-quality 1-100]\n` +
-          `       [--wechat-no-h264] [--wechat-h264-max-fps N] [--wechat-ffmpeg PATH]`,
+          `       [--wechat-no-h264] [--wechat-h264-max-fps N] [--wechat-ffmpeg PATH]\n` +
+          `\n` +
+          `       simfarm download-scrcpy [--force]\n` +
+          `         Fetch the pinned scrcpy server jar the android backend needs.\n` +
+          `         Not usually necessary — it is fetched on demand.`,
       );
       process.exit(0);
     } else throw new Error(`unknown argument: ${a}`);
@@ -123,8 +127,41 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
+/**
+ * `simfarm download-scrcpy` — fetch the pinned scrcpy server jar.
+ *
+ * The Android backend fetches it on demand anyway, so this exists for the cases
+ * where "on demand" is the wrong moment: preparing an image, priming a cache, or
+ * a machine that will not have network when the server first runs. It is also
+ * the command the error messages name, and an error message must name something
+ * that can actually be run.
+ */
+async function downloadScrcpy(argv: string[]): Promise<void> {
+  const { ensureJar, jarPath, loadRelease, sha256File } = await import(
+    "./providers/android/scrcpy-release.ts"
+  );
+  const fs = await import("node:fs");
+  const release = loadRelease();
+  const target = jarPath(release);
+
+  if (argv.includes("--force") && fs.existsSync(target)) fs.unlinkSync(target);
+  if (fs.existsSync(target) && sha256File(target) === release.sha256) {
+    console.log(`scrcpy-server ${release.version} already present and verified:`);
+    console.log(`  ${target}`);
+    return;
+  }
+  const file = await ensureJar(release, undefined, (m) => console.log(m));
+  console.log(`ok: ${file}`);
+  console.log(`sha256 ${release.sha256} (matches vendor/scrcpy-server.json)`);
+}
+
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv[0] === "download-scrcpy") {
+    await downloadScrcpy(argv.slice(1));
+    return;
+  }
+  const args = parseArgs(argv);
 
   const registry = new DeviceRegistry();
   registry.onProviderError = (kind, err) =>

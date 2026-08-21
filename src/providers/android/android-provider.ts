@@ -44,7 +44,7 @@ import {
   NAL_TYPE,
   parameterSetsFromAnnexB,
 } from "../../util/h264.ts";
-import { loadRelease, verifiedJarPath } from "./scrcpy-release.ts";
+import { ensureJar, loadRelease } from "./scrcpy-release.ts";
 import {
   COPY_KEY,
   CONTROL_MSG,
@@ -176,11 +176,13 @@ export class AndroidProvider implements Provider {
   }
 
   async init(_ctx: ProviderContext): Promise<void> {
-    // Verify the pinned jar *before* announcing any device: a device we cannot
-    // actually open is worse than no device at all.
+    // Get the pinned jar in place *before* announcing any device: a device we
+    // cannot actually open is worse than no device at all. On a fresh install
+    // it is not there yet, so this fetches it once (see `ensureJar`).
     const release = loadRelease();
-    this.jar = { path: verifiedJarPath(release), version: release.version };
-    log.info(`scrcpy-server ${release.version} verified (${this.jar.path})`);
+    const jarFile = await ensureJar(release, undefined, (m: string) => log.info(m));
+    this.jar = { path: jarFile, version: release.version };
+    log.info(`scrcpy-server ${release.version} verified (${jarFile})`);
 
     this.devices = await this.toDevices(await listDevices().catch(() => []));
 
