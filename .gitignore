@@ -1,0 +1,17 @@
+node_modules/
+*.log
+logs/
+.DS_Store
+vendor/*.jar
+.tmp/
+
+# Acceptance evidence: screenshots of whatever app happened to be on the
+# simulator when they were taken. Useful in a working copy, not something to
+# publish — the pictures are somebody's real, unreleased UI.
+docs/evidence/
+dist/
+
+# Internal progress log. It is how work is handed between sessions, and it is
+# full of this machine's specifics and the trial and error behind each decision
+# — none of which helps an outside reader. Kept locally, not published.
+STATUS.md

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Replaced with the device name as soon as one is attached: this is the
+         Hyprland window title, and "simfarm test page" is not what you want
+         written across a window you keep open all day (ARCHITECTURE.md). -->
+    <title>simfarm</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- The picture, centred on the void. Everything else floats over it. -->
+    <main id="stage" class="stage" aria-label="device screen"></main>
+
+    <!-- Top cluster: which device, and whether it is live. -->
+    <div id="top-cluster" class="cluster cluster-top">
+      <button
+        id="device-button"
+        class="pill device-pill"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+      >
+        <span id="dot" class="dot dot-off" title="disconnected"></span>
+        <span id="device-name" class="device-name">connecting…</span>
+        <span class="caret" aria-hidden="true">⌄</span>
+      </button>
+
+      <div id="menu" class="menu" role="listbox" hidden>
+        <input
+          id="menu-search"
+          class="menu-search"
+          type="text"
+          placeholder="search"
+          autocomplete="off"
+          spellcheck="false"
+          hidden
+        />
+        <div id="menu-list" class="menu-list"></div>
+      </div>
+    </div>
+
+    <!-- Right rail: only what this device can actually do. Vertical and against
+         the right edge because that is where a phone keeps its side keys, and
+         because "volume_down" spelled out eight times across the bottom ate the
+         whole window width (ARCHITECTURE.md).
+
+         It is a drawer, closed by default: most of the time nobody needs it, and
+         with it closed the device sits in the true centre of the window. The
+         handle opens it — by hand, always; nothing here hides or appears on its
+         own (ARCHITECTURE.md). -->
+    <button
+      id="rail-handle"
+      class="rail-handle"
+      type="button"
+      aria-controls="rail"
+      aria-expanded="false"
+      aria-label="tools"
+      hidden
+    ></button>
+    <div id="rail" class="cluster cluster-right pill rail" hidden></div>
+
+    <!-- Bottom cluster: just the text field, and only while it is switched on. -->
+    <div id="bottom-cluster" class="cluster cluster-bottom">
+      <div id="text-row" class="pill text-row" hidden>
+        <input
+          class="text-input"
+          type="text"
+          placeholder="text to inject"
+          autocomplete="off"
+        />
+        <button class="send-text">send</button>
+      </div>
+    </div>
+
+    <!-- Always visible: the numbers you are here to read. -->
+    <div id="readout" class="readout stats"></div>
+
+    <template id="stream-template">
+      <div class="stream" tabindex="0">
+        <!-- The device body. Inert — no clickable side keys, those are the rail
+             (ARCHITECTURE.md). It exists to separate the app's own pixels from the
+             panel's background, which now wears the desktop's theme and can sit
+             a shade away from whatever the app is painting. -->
+        <div class="bezel">
+          <canvas class="screen"></canvas>
+          <!-- The WeChat simulator draws wx.showModal and friends *outside* the
+               frame we capture, so a dialog is invisible in the picture while the
+               device is in fact blocked. The server reports it (PROTOCOL §6
+               `dialog`) and this layer draws it back over the screen. -->
+          <div class="sheet" hidden></div>
+          <!-- Until the first frame is drawn, the body would otherwise be a
+               black rectangle — and a black rectangle is indistinguishable from
+               a broken one. This says what is being waited for. -->
+          <div class="loading">
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="loading-text"></span>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,947 @@
+/*
+ * simfarm client.
+ *
+ * This is an instrument, not a product page (ARCHITECTURE.md). Someone is looking
+ * *through* it to judge their own app's colour, spacing and motion — so putting
+ * a saturated accent 8px from the thing under test would corrupt the judgement.
+ *
+ *   The status dot is the only saturated colour on the page. There is no other.
+ *
+ * Everything else is grey, and the chrome floats over the picture in small
+ * clusters rather than sitting in bars that eat the window.
+ */
+
+:root {
+  /*
+   * The Omarchy theme, named exactly as the keys the plugin sends
+   * (ARCHITECTURE.md). These are the only values anything outside this file
+   * writes: `window.simfarmApplyTheme()` sets these nine and nothing else.
+   * The defaults below are the original dark palette, so a page opened without
+   * a `?theme=` parameter looks exactly as it always did.
+   */
+  --bg: #0a0a0b; /* not pure black, so the device's own black reads as black */
+  --bgAlt: #17171a;
+  --fg: #e6e6ea;
+  --fgDim: #8a8a93;
+  --line: #232327;
+  --accent: #ff5a4a;
+  --ok: #2ed67f;
+  --warn: #c9a227;
+  --bad: #e0603a;
+
+  /*
+   * …and the names the rest of this file speaks in. The indirection is what
+   * lets the panel follow a light theme without every rule in the file having
+   * to know that "void" might now be cream.
+   */
+  --void: var(--bg);
+  --float: var(--bgAlt); /* the floating clusters */
+  --hairline: var(--line);
+  --text: var(--fgDim); /* readouts, deliberately dim */
+  --text-bright: var(--fg); /* device name */
+
+  /* The only saturated colours in the file, and each one is semantic. */
+  --live: var(--ok);
+  --idle: var(--warn);
+  --stalled: var(--bad);
+  --off: var(--line);
+
+  /* Local faces only: this page is served over Tailscale to a machine whose
+     outbound traffic goes through a proxy, so a webfont is a stall, not a look. */
+  --font-mono: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans Mono",
+    ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-ui: "Noto Sans", system-ui, -apple-system, sans-serif;
+
+  --fade: 150ms;
+
+  /*
+   * The strip down the right edge that belongs to the rail.
+   *
+   * It is a *reserved column*, not a decoration: the rail used to be a fixed
+   * element floating over the picture, which meant the right-hand slice of the
+   * device was both invisible and unclickable — a press landed on the rail
+   * instead of passing through to the device. And 1:1 is not negotiable
+   * (ARCHITECTURE.md), so the picture cannot shrink to make room; the window
+   * gets wider instead.
+   *
+   * The number is here rather than in app.js because both need it and they must
+   * not drift: `railGutter()` reads this property.
+   */
+  --rail-gutter: 72px;
+  /** the drawer pull that is always there, even with the rail closed */
+  --rail-handle: 14px;
+  --slide: 200ms;
+
+  /*
+   * The device body.
+   *
+   * A fixed graphite rather than a theme colour, and that is the point: it has
+   * to read as a phone against *both* a near-black panel and a cream one, and
+   * it has to stay distinct from whatever the app under test is painting. A
+   * value derived from the theme would track the background it is supposed to
+   * be separating the app from.
+   */
+  --bezel: #35353a;
+  --bezel-edge: #4a4a52;
+}
+
+/*
+ * Tells the browser which way round the theme is, so its own furniture — the
+ * text field's caret, selection, scrollbars, focus rings — matches. Without it
+ * a light Omarchy theme gets a dark caret in a cream input.
+ */
+:root[data-mode="light"] {
+  color-scheme: light;
+}
+
+:root[data-mode="dark"] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * `display` on a class beats the user agent's `[hidden] { display: none }`, so
+ * the flex containers below would ignore the attribute entirely and the text
+ * field would sit there permanently. Anything the script hides has to stay
+ * hidden.
+ */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--void);
+  color: var(--text);
+  font: 12px/1.4 var(--font-mono);
+  /* fps and pixel counts change every second; without this the whole readout
+     jitters sideways as digits swap width */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- the picture */
+
+/*
+ * The picture is centred in the *window*, and slides left to make room when the
+ * rail is opened (`.stream` below). It is not centred in "window minus rail":
+ * with the rail closed there is no rail to leave room for, and leaving room
+ * anyway is what made the whole composition sit off to one side of its own
+ * window.
+ */
+.stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+}
+
+/*
+ * Opening the rail shifts the picture by half the gutter, so the picture plus
+ * the rail stay centred together.
+ *
+ * A transform, not a change of padding or width: it runs on the compositor, it
+ * cannot reflow the canvas mid-animation, and — the part that matters — the
+ * window is never resized to open a drawer. The window always reserves the
+ * gutter, so toggling is one slide and nothing for a window manager to argue
+ * with.
+ */
+.stream {
+  outline: none;
+  line-height: 0;
+  transition: transform var(--slide) ease;
+}
+
+body.rail-open .stream {
+  transform: translateX(calc(var(--rail-gutter) / -2));
+}
+
+/* ------------------------------------------------------------------- bezel */
+
+/*
+ * Inert device body (ARCHITECTURE.md).
+ *
+ * Two jobs, and neither is decoration. It separates the app's pixels from the
+ * panel — which now follows the desktop theme, so the two can end up nearly the
+ * same colour and the boundary disappears. And it is what made following the
+ * theme defensible at all: the thing beside the app under test is the body, not
+ * the desktop.
+ *
+ * It must never change the picture's size. The padding grows the *window*
+ * (`bezelPad()` is in the resize arithmetic); the canvas stays 1:1 (§4.1).
+ */
+.bezel {
+  position: relative;
+  padding: var(--bezel-pad, 10px);
+  border: 1px solid var(--bezel-edge);
+  border-radius: var(--bezel-radius, 28px);
+  background: var(--bezel);
+}
+
+/*
+ * The screen's own corners.
+ *
+ * Rounded because the real device rounds them too — a phone genuinely does not
+ * show you those pixels — so square corners here would be the less faithful
+ * choice, not the safer one.
+ */
+.bezel canvas.screen {
+  border-radius: calc(var(--bezel-radius, 28px) - var(--bezel-pad, 10px));
+}
+
+/* ---------------------------------------------------------------- sheets */
+
+/*
+ * A dialog the device is showing that the video cannot contain: the WeChat IDE
+ * draws `wx.showModal`, action sheets, toasts, the authorization and payment
+ * sheets over the simulator rather than inside the page frame we capture, so
+ * without this the client shows a page that simply stops responding.
+ *
+ * It is drawn where the simulator draws it (the server sends a rect normalized
+ * to the screen) but in this page's own greys, never in weui's. Painting a
+ * convincing replica would be the one dishonest thing this client could do:
+ * someone is here to judge their app's real pixels, and these are not them.
+ */
+.sheet {
+  position: absolute;
+  /* Aligned to the screen, not the body: the dialog is something the device is
+     showing, and it does not spill onto the bezel. */
+  inset: var(--bezel-pad, 10px);
+  line-height: 1.4;
+  font-family: var(--font-ui);
+  background: rgb(0 0 0 / 55%);
+}
+
+/* --------------------------------------------------------------- loading */
+
+/*
+ * "Nothing is on screen" and "it is broken" look identical, and this project
+ * has already lost an afternoon to exactly that — a stream that was arriving
+ * perfectly while the canvas stayed black. So the wait says what it is waiting
+ * for, and gives up out loud rather than spinning forever.
+ */
+.loading {
+  position: absolute;
+  inset: var(--bezel-pad, 10px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  border-radius: inherit;
+  background: #000;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.loading[hidden] {
+  display: none !important;
+}
+
+/*
+ * Grey, like everything else. The status dot is the only saturated colour on
+ * the page (ARCHITECTURE.md) and a spinner is not an exception to that.
+ */
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--hairline);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading.gave-up .spinner {
+  animation: none;
+  border-top-color: var(--hairline);
+}
+
+.sheet-box {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--float);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+}
+
+.sheet-kind {
+  padding: 6px 12px 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+.sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 12px 10px;
+}
+
+.sheet-title {
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sheet-content {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sheet-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--hairline);
+}
+
+.sheet-buttons button {
+  flex: 1 1 0;
+  min-width: 33%;
+  padding: 8px 6px;
+  border: 0;
+  border-left: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sheet-buttons button:first-child {
+  border-left: 0;
+}
+
+.sheet-buttons button:hover {
+  background: var(--hairline);
+  color: var(--text-bright);
+}
+
+.sheet-buttons button.confirm {
+  color: var(--text-bright);
+}
+
+.sheet-buttons button:disabled {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+canvas.screen {
+  display: block;
+  touch-action: none;
+  /*
+   * A pointer, not a crosshair. A crosshair reads as "sample this pixel" or
+   * "drag a marquee"; this is a screen you tap with a finger. The grab state
+   * during a drag is the same reasoning — the finger is down and taking the
+   * content with it.
+   */
+  cursor: pointer;
+  /* No border, no radius, no shadow, no card. The picture is the picture
+     (ARCHITECTURE.md, §4.4). */
+  background: #000;
+}
+
+canvas.screen.dragging {
+  cursor: grabbing;
+}
+
+.stage .empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  line-height: 1.4;
+  text-align: center;
+}
+
+.empty-name {
+  color: var(--text-bright);
+  font-size: 14px;
+}
+
+.empty-why {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.empty-why.bad {
+  color: var(--stalled);
+  opacity: 1;
+}
+
+/*
+ * Starting a device is the one action in this panel that costs real time and
+ * real machine, so it is a button you press on purpose — not something that
+ * happens because a row in a list got clicked.
+ */
+.stage .empty .start {
+  margin-top: 4px;
+  padding: 5px 16px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--float);
+  color: var(--text-bright);
+  font: inherit;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+
+.stage .empty .start:hover:not(:disabled) {
+  border-color: var(--text);
+}
+
+.stage .empty .start:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* ------------------------------------------------------------------ clusters */
+
+/*
+ * Centred over the *picture*, in both states — which means moving with it when
+ * the rail opens. Pinning these to the middle of the window instead is what
+ * makes a layout read as crooked: two centres half a rail apart.
+ */
+.cluster {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  transition: transform var(--slide) ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 10;
+}
+
+.cluster-top {
+  top: 14px;
+}
+
+.cluster-bottom {
+  bottom: 14px;
+}
+
+body.rail-open .cluster-top,
+body.rail-open .cluster-bottom {
+  transform: translateX(calc(-50% - var(--rail-gutter) / 2));
+}
+
+/*
+ * The rail sits against the right edge, where a phone keeps its side keys.
+ * Vertical because the horizontal version spelled every name out — `volume_down`
+ * beside `app_switch` beside `ringer_mute` — and eight of those ate the window
+ * (ARCHITECTURE.md).
+ */
+/*
+ * The rail sits just inside the handle. Hidden with visibility rather than
+ * `display`, so it can fade with the slide instead of appearing all at once —
+ * `[hidden]` stays for "there is no device at all", which is a different thing
+ * and should not animate.
+ */
+.cluster-right {
+  top: 50%;
+  right: calc(var(--rail-handle) + 8px);
+  left: auto;
+  transform: translateY(-50%) translateX(6px);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity var(--slide) ease,
+    transform var(--slide) ease,
+    visibility var(--slide);
+}
+
+body.rail-open .cluster-right {
+  transform: translateY(-50%);
+  opacity: 1;
+  visibility: visible;
+}
+
+/*
+ * The drawer pull. Deliberately tiny: with the rail closed the picture is
+ * centred in the whole window, so there are only ~48px of margin on that side
+ * and anything wider would sit on top of the device.
+ */
+.rail-handle {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rail-handle);
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-right: 0;
+  border-radius: 7px 0 0 7px;
+  background: color-mix(in srgb, var(--float) 86%, transparent);
+  backdrop-filter: blur(12px);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.rail-handle:hover {
+  color: var(--text-bright);
+}
+
+.rail-handle:focus-visible {
+  outline: 1px solid var(--text-bright);
+  outline-offset: 1px;
+}
+
+.rail-handle svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--float) 86%, transparent);
+  backdrop-filter: blur(12px);
+  color: var(--text);
+  font: inherit;
+}
+
+.device-pill {
+  cursor: pointer;
+  max-width: 70vw;
+}
+
+.device-pill:hover {
+  color: var(--text-bright);
+}
+
+.device-pill:focus-visible,
+.rail-button:focus-visible,
+.menu-row:focus-visible {
+  outline: 1px solid var(--text-bright);
+  outline-offset: 1px;
+}
+
+.device-name {
+  font-family: var(--font-ui);
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.caret {
+  color: var(--text);
+  font-size: 10px;
+}
+
+/* ---------------------------------------------------------------- status dot */
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--off);
+}
+
+.dot-live {
+  background: var(--live);
+}
+.dot-idle {
+  background: var(--idle);
+}
+.dot-stalled {
+  background: var(--stalled);
+}
+.dot-off {
+  background: var(--off);
+}
+
+/* --------------------------------------------------------------- the dropdown */
+
+.menu {
+  min-width: 260px;
+  max-width: 80vw;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--float) 94%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.menu-search {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 6px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-bright);
+  font: inherit;
+  font-family: var(--font-ui);
+}
+
+.menu-search:focus {
+  outline: none;
+  border-color: var(--text);
+}
+
+.menu-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-bright);
+  font: inherit;
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.menu-row:hover,
+.menu-row.active {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Not booted: still listed, but plainly not running. */
+.menu-row.dim {
+  color: var(--text);
+}
+
+.menu-row.current::after {
+  content: "·";
+  margin-left: auto;
+  color: var(--text);
+}
+
+/* "show all (28)" and "detach" — present, but not competing with the devices. */
+.menu-row.quiet {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.menu-empty {
+  padding: 7px 9px;
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--hairline);
+}
+
+/* --------------------------------------------------------------------- rail */
+
+.rail {
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 5px;
+  border-radius: 16px;
+}
+
+.rail:empty {
+  display: none;
+}
+
+.rail-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rail-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Fallback for a declared button with no glyph in the table. */
+.rail-abbr {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.rail-button:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline);
+}
+
+.rail-button.on {
+  color: var(--text-bright);
+  border-color: var(--hairline);
+}
+
+/*
+ * The name, only while the pointer is on the button. It slides out to the
+ * *left*: the rail is against the right edge and there is nothing to its right.
+ */
+.rail-label {
+  position: absolute;
+  right: calc(100% + 8px);
+  padding: 2px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--float) 94%, transparent);
+  color: var(--text-bright);
+  font-size: 10px;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateX(4px);
+  pointer-events: none;
+  transition:
+    opacity var(--fade) ease,
+    transform var(--fade) ease;
+}
+
+.rail-button:hover .rail-label,
+.rail-button:focus-visible .rail-label {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* ------------------------------------------------------------- zoom popover */
+
+/*
+ * The rail is icons only; the value lives here instead. It opens to the left,
+ * because the rail is against the right edge of the window and there is nothing
+ * to its right — the same reason the hover labels go that way.
+ */
+.zoom-pop {
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--float) 94%, transparent);
+  backdrop-filter: blur(12px);
+  cursor: default;
+}
+
+/* The hover label would sit on top of the popover it just opened. */
+.rail-button.on .zoom-pop ~ .rail-label,
+.zoom-pop + .rail-label {
+  display: none;
+}
+
+.zoom-pop input[type="range"] {
+  width: 132px;
+  margin: 0;
+  accent-color: var(--text);
+  cursor: pointer;
+}
+
+.zoom-value {
+  min-width: 62px;
+  color: var(--text-bright);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* "auto" means nobody has chosen; the number is ours, not theirs. */
+.zoom-value.auto {
+  color: var(--text);
+}
+
+.zoom-fit {
+  padding: 2px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.zoom-fit:hover,
+.zoom-fit.on {
+  color: var(--text-bright);
+  border-color: var(--text);
+}
+
+/*
+ * Hardware keys above, this client's own tools below. `rotate`, `text` and the
+ * zoom toggle are things the *client* does; run together with the keys they
+ * read as if the phone had a "100%" button on its side.
+ */
+.rail-sep {
+  width: 16px;
+  height: 1px;
+  margin: 4px auto;
+  background: var(--hairline);
+}
+
+.text-row button {
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.text-row button:hover {
+  color: var(--text-bright);
+  border-color: var(--hairline);
+}
+
+.text-row {
+  gap: 6px;
+}
+
+.text-row .text-input {
+  width: 220px;
+  padding: 3px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-bright);
+  font: inherit;
+  font-family: var(--font-ui);
+}
+
+.text-row .text-input:focus {
+  outline: none;
+  border-color: var(--text);
+}
+
+/* ------------------------------------------------------------------ readout */
+
+/*
+ * The line is longer than the panel is wide — the panel is about 500px and this
+ * runs to nine fields — so it wraps. Two things make wrapping safe:
+ *
+ *  - it is `position: fixed`, so an extra line does **not** push the picture up.
+ *    If it were in flow, wrapping would change the height available to the
+ *    canvas, and 1:1 (§4.1) would break the moment a device name got long.
+ *  - the separators are `·` surrounded by ordinary spaces, so the break lands
+ *    between fields rather than inside a number.
+ */
+.readout {
+  position: fixed;
+  left: 12px;
+  right: calc(var(--rail-gutter) + 12px);
+  bottom: 10px;
+  z-index: 10;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  pointer-events: none;
+  /* Stays put when the clusters fade — but it is off unless the `info` key in
+     the rail is on (ARCHITECTURE.md). An error forces it back for six seconds;
+     a report into a hidden element is not a report. */
+}
+
+.readout .warn {
+  color: var(--idle);
+}
+
+/* A shrunken picture is the one thing here that can quietly mislead. */
+.readout .warn.strong {
+  color: var(--stalled);
+  font-weight: 600;
+}
+
+.readout .bad {
+  color: var(--stalled);
+}
+
+/* --------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Switch, do not slide. The two states still differ; getting between them
+     just stops being a movement. */
+  .stream,
+  .cluster,
+  .cluster-right {
+    transition: none;
+  }
+  /* The words carry the meaning; the spinner was only ever reassurance. */
+  .spinner {
+    display: none;
+  }
+  .rail-label {
+    transition: none;
+    transform: none;
+  }
+}

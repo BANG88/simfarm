@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Pinned scrcpy server build (ARCHITECTURE.md). The server protocol is NOT stable",
+    "across versions, so the version and its digest live in git while the jar",
+    "itself does not (.gitignore ignores vendor/*.jar).",
+    "",
+    "Upgrading is an explicit change: bump `version`, put the new `sha256` here,",
+    "re-read the v4.1-era assumptions in src/providers/android/scrcpy-session.ts",
+    "(socket order, 12-byte packet header, session packet, control message ids),",
+    "then re-run the evidence capture.",
+    "",
+    "Fetch with:  node src/providers/android/download-scrcpy-server.ts"
+  ],
+  "version": "4.1",
+  "tag": "v4.1",
+  "file": "scrcpy-server-v4.1.jar",
+  "url": "https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-server-v4.1",
+  "sha256": "deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae"
+}
