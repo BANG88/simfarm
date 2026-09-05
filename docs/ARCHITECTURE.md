@@ -52,7 +52,7 @@ and no per-backend port.
 | `src/protocol.ts` | Wire encode/decode. Mirrored byte-for-byte by `web/protocol.js`. |
 | `src/types.ts` | `Provider`, `DeviceHandle`, `Capabilities`, `Screen`. Read this first. |
 | `src/util/h264.ts` | Annex-B ↔ avcC conversion, parameter-set extraction, shared by two backends. |
-| `src/providers/wechat/h264-encoder.ts`, `src/providers/android/jpeg-transcoder.ts` | The two ffmpeg pipelines: JPEG → H.264 for WeChat, H.264 → JPEG for Android. |
+| `src/providers/wechat/h264-encoder.ts`, `src/providers/android/jpeg-transcoder.ts`, `src/providers/ios/jpeg-scaler.ts` | The three ffmpeg pipelines: JPEG → H.264 for WeChat, H.264 → JPEG for Android, JPEG → smaller JPEG for iOS. |
 | `src/providers/*` | One directory per backend. |
 | `web/` | The client. Plain ESM, no framework, no build step. |
 | `vendor/scrcpy-server.json` | Pinned scrcpy server version and its SHA-256. |

@@ -12,7 +12,8 @@
  * The handle then translates:
  *
  *   GET  {base}/_ios/helper/<udid>/stream.avcc   -> VIDEO frames (h264)
- *   GET  {base}/_ios/helper/<udid>/stream.mjpeg  -> VIDEO frames (jpeg)
+ *   GET  {base}/_ios/helper/<udid>/stream.mjpeg  -> VIDEO frames (jpeg), capped
+ *                                                    in size and rate by jpeg-scaler.ts
  *   WS   {base}/_ios/helper/<udid>/ws            <- INPUT messages
  *   GET  {base}/_ios/helper/<udid>/config        -> screen events
  *   GET  {base}/_ios/helper/<udid>/foreground    -> foreground events
@@ -35,6 +36,14 @@ import {
   orientationFrame,
   type SimScreenConfig,
 } from "./hid-protocol.ts";
+import {
+  DEFAULT_SCALER,
+  JpegScaler,
+  fitWithin,
+  probeScaler,
+  type ScalerOptions,
+  type Size,
+} from "./jpeg-scaler.ts";
 import { MjpegParser } from "./mjpeg.ts";
 import { displayedScreen, frameRotationFor } from "./rotation.ts";
 import { loadServeSim, type SimMiddleware } from "./serve-sim.ts";
@@ -97,9 +106,21 @@ const CAPS: Capabilities = {
 const UDID_RE =
   /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
+export interface IosProviderOptions {
+  /** longest side of a delivered jpeg picture, px; 0 leaves the framebuffer size alone */
+  jpegMaxSize?: number;
+  /** frame cap on the jpeg path; 0 removes it */
+  jpegMaxFps?: number;
+  /** JPEG quality of re-encoded (scaled) pictures, 1-100 */
+  jpegQuality?: number;
+  /** where to find ffmpeg for the scaler */
+  ffmpegPath?: string;
+}
+
 export class IosProvider implements Provider {
   readonly kind = "ios" as const;
 
+  private scaler: ScalerOptions;
   private mw: SimMiddleware | null = null;
   private baseUrl = "";
   private readonly bridge = new HidBridge();
@@ -107,6 +128,15 @@ export class IosProvider implements Provider {
   private pollTimer: NodeJS.Timeout | null = null;
   private lastFingerprint = "";
   private disposed = false;
+
+  constructor(options: IosProviderOptions = {}) {
+    this.scaler = {
+      ffmpegPath: options.ffmpegPath ?? DEFAULT_SCALER.ffmpegPath,
+      maxSize: options.jpegMaxSize ?? DEFAULT_SCALER.maxSize,
+      maxFps: options.jpegMaxFps ?? DEFAULT_SCALER.maxFps,
+      quality: options.jpegQuality ?? DEFAULT_SCALER.quality,
+    };
+  }
 
   // -------------------------------------------------------------------------
   // lifecycle
@@ -139,6 +169,26 @@ export class IosProvider implements Provider {
     log.info(
       `serve-sim mounted at ${IOS_BASE}; ${devices.length} iOS simulators (${devices.filter((d) => d.state === "Booted").length} booted)`,
     );
+
+    // The jpeg path does not *depend* on ffmpeg — serve-sim's pictures are
+    // JPEG already — but without it they go out at the framebuffer's full
+    // size, which is the thing `--ios-max-size` exists to stop. Probe once so
+    // the log says which it will be, rather than every attach finding out.
+    if (this.scaler.maxSize > 0) {
+      if (await probeScaler(this.scaler.ffmpegPath)) {
+        log.info(
+          `jpeg frames capped at ${this.scaler.maxSize}px / ${this.scaler.maxFps || "unlimited"} fps ` +
+            `via ${this.scaler.ffmpegPath}`,
+        );
+      } else {
+        log.warn(
+          `no usable ffmpeg at "${this.scaler.ffmpegPath}" — iOS jpeg frames go out at the ` +
+            `framebuffer's full size (1206x2622 on an iPhone 17 Pro), which a phone viewer ` +
+            `pays for on every frame. brew install ffmpeg`,
+        );
+        this.scaler = { ...this.scaler, maxSize: 0 };
+      }
+    }
 
     this.pollTimer = setInterval(() => void this.poll(), DEVICE_POLL_MS);
     this.pollTimer.unref?.();
@@ -205,9 +255,10 @@ export class IosProvider implements Provider {
     const hid = await this.bridge.connect(udid);
 
     const geometry = await simctl.deviceGeometry(device.deviceTypeIdentifier);
+    const geometryScale = geometry?.scale ?? 1;
     // Attaching to an already-rotated simulator has to report the rotation too,
     // not just a later rotate op — so this goes through the same helper.
-    const screen = displayedScreen(config, geometry?.scale ?? 1);
+    const screen = displayedScreen(config, geometryScale);
 
     log.info(
       `opened ${device.name} (${udid}) ${screen.width}x${screen.height} ${screen.orientation} (frame ${config.width}x${config.height}, rotate ${screen.frameRotation}deg)`,
@@ -226,6 +277,8 @@ export class IosProvider implements Provider {
       this.baseUrl,
       hid,
       config,
+      geometryScale,
+      this.scaler,
     );
   }
 
@@ -309,6 +362,25 @@ class IosHandle implements DeviceHandle {
    * look like a change.
    */
   private fb: SimScreenConfig;
+  /** profile.plist's backing scale; the reported `scale` shrinks with the picture */
+  private readonly geometryScale: number;
+  private readonly scalerOptions: ScalerOptions;
+  private codec: Codec | null = null;
+  /** the jpeg cap, alive only while a jpeg stream is */
+  private scaler: JpegScaler | null = null;
+
+  /**
+   * The same shape of ledger the Android handle keeps, so `stats` (and
+   * tools/measure-stream.ts) can say where a missing picture went.
+   */
+  readonly stats = {
+    /** frames parsed out of serve-sim's stream (avcc units or whole JPEGs) */
+    framesIn: 0,
+    /** handed to the session */
+    framesOut: 0,
+    bytesIn: 0,
+    bytesOut: 0,
+  };
 
   constructor(
     device: Device,
@@ -316,12 +388,16 @@ class IosHandle implements DeviceHandle {
     baseUrl: string,
     hid: HidSocket,
     fb: SimScreenConfig,
+    geometryScale: number,
+    scalerOptions: ScalerOptions,
   ) {
     this.device = device;
     this.udid = udid;
     this.baseUrl = baseUrl;
     this.hid = hid;
     this.fb = fb;
+    this.geometryScale = geometryScale;
+    this.scalerOptions = scalerOptions;
   }
 
   subscribe(events: HandleEvents): void {
@@ -354,11 +430,28 @@ class IosHandle implements DeviceHandle {
       throw new Error(`serve-sim ${codec} stream failed: ${res.status}`);
     }
 
+    this.codec = codec;
+    if (codec === "jpeg") this.startScaler();
+    // session.ts emits `handle.device.screen` right after this resolves, so
+    // the size it reports has to be the delivered one, not the framebuffer's.
+    this.publishScreen(false);
+    const size = this.deliveredSize();
+    log.info(
+      `${this.udid}: streaming ${size.width}x${size.height} ${codec}` +
+        (this.scaler?.needsScaling
+          ? ` (scaled from ${this.fb.width}x${this.fb.height}, max-size ${this.scalerOptions.maxSize}, ` +
+            `${this.scalerOptions.maxFps || "unlimited"} fps, q${this.scalerOptions.quality})`
+          : codec === "jpeg" && this.scalerOptions.maxFps > 0
+            ? ` (${this.scalerOptions.maxFps} fps)`
+            : ""),
+    );
+
     void this.pump(codec, res.body, onFrame, abort);
 
     return () => {
       if (this.abort === abort) this.abort = null;
       abort.abort();
+      this.stopScaler();
     };
   }
 
@@ -371,6 +464,16 @@ class IosHandle implements DeviceHandle {
     const avcc = new AvccParser();
     const mjpeg = new MjpegParser();
     let firstJpeg = true;
+    const emitJpeg = (jpeg: Uint8Array): void => {
+      if (abort.signal.aborted) return;
+      // The very first jpeg is delivered as SEED so a fresh client has a
+      // picture immediately; the rest are ordinary complete frames.
+      this.stats.framesOut++;
+      this.stats.bytesOut += jpeg.length;
+      onFrame(firstJpeg ? VIDEO_TAG.SEED : VIDEO_TAG.KEY, jpeg);
+      firstJpeg = false;
+    };
+    if (this.scaler) this.scaler.sink = emitJpeg;
     const reader = body.getReader();
     try {
       for (;;) {
@@ -378,13 +481,21 @@ class IosHandle implements DeviceHandle {
         if (done || abort.signal.aborted) break;
         if (!value) continue;
         if (codec === "h264") {
-          for (const frame of avcc.push(value)) onFrame(frame.tag, frame.data);
+          for (const frame of avcc.push(value)) {
+            this.stats.framesIn++;
+            this.stats.bytesIn += frame.data.length;
+            this.stats.framesOut++;
+            this.stats.bytesOut += frame.data.length;
+            onFrame(frame.tag, frame.data);
+          }
         } else {
           for (const jpeg of mjpeg.push(value)) {
-            // The very first jpeg is delivered as SEED so a fresh client has a
-            // picture immediately; the rest are ordinary complete frames.
-            onFrame(firstJpeg ? VIDEO_TAG.SEED : VIDEO_TAG.KEY, jpeg);
-            firstJpeg = false;
+            this.stats.framesIn++;
+            this.stats.bytesIn += jpeg.length;
+            // The scaler owns the rate cap and the size cap; without one
+            // (h264 never has one) pictures go straight through.
+            if (this.scaler) this.scaler.push(jpeg);
+            else emitJpeg(jpeg);
           }
         }
       }
@@ -440,6 +551,19 @@ class IosHandle implements DeviceHandle {
       case "foreground":
         return await this.readForeground();
 
+      case "stats":
+        // Diagnostic: the frame ledger, the framebuffer against what is
+        // actually delivered, and the scaler's own counters when one runs.
+        return {
+          ...this.stats,
+          codec: this.codec,
+          frameSize: { width: this.fb.width, height: this.fb.height },
+          videoSize: this.deliveredSize(),
+          scaler: this.scaler
+            ? { ...this.scaler.stats, scaling: this.scaler.scaling, target: this.scaler.target }
+            : null,
+        };
+
       /*
        * PROTOCOL §4 `appearance`. Reads back afterwards rather than trusting
        * the exit status: a client that follows the desktop theme would
@@ -470,6 +594,7 @@ class IosHandle implements DeviceHandle {
     this.closed = true;
     this.abort?.abort();
     this.abort = null;
+    this.stopScaler();
     if (this.foregroundTimer) clearInterval(this.foregroundTimer);
     this.foregroundTimer = null;
     this.hid.close();
@@ -486,13 +611,63 @@ class IosHandle implements DeviceHandle {
     ) {
       return;
     }
+    const resized = this.fb.width !== config.width || this.fb.height !== config.height;
     this.fb = config;
     // On iOS width/height do *not* move when the guest rotates — only
     // `orientation` does — so this is usually an orientation-only change that
-    // nevertheless flips the reported dimensions and `frameRotation`.
-    const screen = displayedScreen(config, this.device.screen?.scale ?? 1);
+    // nevertheless flips the reported dimensions and `frameRotation`. A real
+    // resize (the guest changing its framebuffer) needs a fresh ffmpeg, whose
+    // encoder was opened at the old picture's size.
+    if (resized && this.scaler) {
+      log.info(`${this.udid}: framebuffer now ${config.width}x${config.height}, restarting the jpeg scaler`);
+      const sink = this.scaler.sink;
+      this.stopScaler();
+      this.startScaler();
+      this.scaler!.sink = sink;
+    }
+    this.publishScreen();
+  }
+
+  /**
+   * `device.screen` as the client should see it: the delivered picture,
+   * rotated upright, with `scale` shrunk in step so `width / scale` is still
+   * the device's point size (PROTOCOL §7). Mutated in place because
+   * session.ts reads `handle.device.screen` after attach.
+   */
+  private publishScreen(emit = true): void {
+    const size = this.deliveredSize();
+    const scale = round3(this.geometryScale * (size.width / this.fb.width));
+    const screen = displayedScreen({ ...this.fb, ...size }, scale);
     this.device.screen = screen;
-    this.events.onScreen?.({ ...screen });
+    if (emit) this.events.onScreen?.({ ...screen });
+  }
+
+  /** Pixel size of the frames actually sent: the framebuffer, unless the jpeg cap shrinks it. */
+  private deliveredSize(): Size {
+    if (this.scaler) return this.scaler.delivered;
+    if (this.codec === "jpeg") return fitWithin(this.fb.width, this.fb.height, this.scalerOptions.maxSize);
+    return { width: this.fb.width, height: this.fb.height };
+  }
+
+  private startScaler(): void {
+    const scaler = new JpegScaler(
+      this.scalerOptions,
+      { width: this.fb.width, height: this.fb.height },
+      (jpeg) => scaler.sink?.(jpeg),
+    );
+    scaler.onFailure = () => {
+      if (this.closed || this.scaler !== scaler) return;
+      // Pictures now arrive at the framebuffer's size; say so before the
+      // client draws one into a rectangle sized for the small ones.
+      this.publishScreen();
+    };
+    this.scaler = scaler;
+    scaler.start();
+  }
+
+  private stopScaler(): void {
+    this.scaler?.stop();
+    this.scaler = null;
   }
 
   private async awaitOrientation(want: Orientation): Promise<Screen | undefined> {
@@ -574,6 +749,15 @@ export function selfUrl(ctx: ProviderContext): string {
     return `http://127.0.0.1:${ctx.port}`;
   }
   return ctx.baseUrl;
+}
+
+/**
+ * `scale` goes out with three decimals: a phone viewer sizes its stage as
+ * `width / scale` points, and at two decimals a scaled 472x1024 picture would
+ * come out half a point wide of the device's 402.
+ */
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
 }
 
 function sleep(ms: number): Promise<void> {
