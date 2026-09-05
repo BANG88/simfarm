@@ -1,0 +1,140 @@
+name: Release
+
+# Same idea as osuki-dev/kit: a push to main is not a release. What the run
+# does depends on whether changesets are pending:
+#
+#   changesets pending  -> open or update the "chore: version packages" PR.
+#                          Nothing is published.
+#   none pending        -> the version PR has just been merged, so the bumped
+#                          version is on main. Publish it to npm, tag it, and
+#                          write the GitHub release from the changelog.
+#
+# So the gate on publishing is merging the version PR, which is a deliberate
+# human action with the exact version bump and changelog in front of you. Any
+# other push to main (docs, CI tweaks, a version already on npm) ends after the
+# decision step. workflow_dispatch is kept for re-running a release that failed
+# after the merge, without an empty commit.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Version or publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # commit the version bump, push the release tag
+      pull-requests: write # open the "Version Packages" PR
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets diffs against the base branch
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      # npm publishes the package: it is the client that supports trusted
+      # publishing, so no NPM_TOKEN is stored anywhere.
+      #
+      # Deliberately no `registry-url`. Setting it makes setup-node write an
+      # .npmrc containing `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`
+      # and point NPM_CONFIG_USERCONFIG at it. With no NODE_AUTH_TOKEN in the
+      # environment that resolves to an empty credential, and an explicit
+      # authToken in .npmrc takes precedence over OIDC — so npm signs the
+      # provenance, then sends the empty token and the registry answers
+      # `404 Not Found - PUT`, which reads like a missing package rather than an
+      # auth failure. The registry defaults to npmjs.org anyway.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Use an npm that supports trusted publishing
+        # Trusted publishing (OIDC) needs npm >= 11.5.1. Node 22 ships npm 10.
+        run: npm install -g npm@^11.5.1
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Verify before releasing
+        # A release must not be the first place these run. CI already gates the
+        # PR; this rejects anything that reached main another way.
+        run: |
+          bun run typecheck
+          bun run test
+          npm pack --dry-run
+          git diff --exit-code -- package.json
+
+      - name: Open or update the version PR
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # `version` writes the bump and the changelog; the action opens a PR
+          # with them. Merging that PR runs this workflow again with no
+          # changesets left, and the steps below then publish.
+          #
+          # No `publish` here: an explicit `npm publish` below keeps npm's own
+          # output — registry, tarball contents, provenance — in the log.
+          version: bun run version:packages
+          title: "chore: version packages"
+          commit: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether this push is a release
+        id: decide
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.changesets.outputs.hasChangesets }}" = "true" ]; then
+            echo "changesets pending -> version PR only"; echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if npm view "simfarm@$VERSION" version >/dev/null 2>&1; then
+            echo "$VERSION is already on npm"; echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "publishing $VERSION"; echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish ${{ steps.decide.outputs.version }}
+        if: steps.decide.outputs.publish == 'true'
+        # `prepack` builds dist/ and strips the development scripts out of
+        # package.json; `postpack` puts them back. Same path as a publish by
+        # hand, so the tarball is the same tarball.
+        run: |
+          npm --version
+          echo "registry: $(npm config get registry)"
+          npm publish --dry-run --access public 2>&1 | tail -40
+          npm publish --provenance --access public
+          echo "published: $(npm view "simfarm@${{ steps.decide.outputs.version }}" version)"
+
+      - name: Push the release tag
+        if: steps.decide.outputs.publish == 'true'
+        run: |
+          git tag "v${{ steps.decide.outputs.version }}" 2>/dev/null || true
+          git push origin "v${{ steps.decide.outputs.version }}"
+
+      - name: GitHub release
+        if: steps.decide.outputs.publish == 'true'
+        # Notes come from the CHANGELOG section changesets wrote for this version.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          node tools/release-notes.ts "$VERSION" > "$RUNNER_TEMP/notes.md"
+          printf '\n\nnpm: https://www.npmjs.com/package/simfarm/v/%s\n' "$VERSION" >> "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+
+      - name: Report
+        if: steps.decide.outputs.publish == 'true'
+        run: |
+          echo "### Published simfarm ${{ steps.decide.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/simfarm/v/${{ steps.decide.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"

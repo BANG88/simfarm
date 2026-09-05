@@ -54,7 +54,9 @@
     "scrcpy:download": "node src/main.ts download-scrcpy",
     "build": "bun tools/build.ts",
     "prepack": "bun run build && node tools/pack-manifest.ts strip",
-    "postpack": "node tools/pack-manifest.ts restore"
+    "postpack": "node tools/pack-manifest.ts restore",
+    "changeset": "changeset",
+    "version:packages": "changeset version && bun install --lockfile-only"
   },
   "dependencies": {
     "jpeg-js": "^0.4.4",
@@ -62,6 +64,8 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.1",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
     "typescript": "^5.9.0"
