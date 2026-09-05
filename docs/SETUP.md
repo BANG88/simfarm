@@ -45,14 +45,14 @@ See [bun.sh](https://bun.sh) for other install methods. The repository pins
 
 Check with `node --version`.
 
-### ffmpeg — H.264 for WeChat, JPEG for Android
+### ffmpeg — H.264 for WeChat, JPEG for Android, smaller JPEG for iOS
 
 ```bash
 brew install ffmpeg
 ffmpeg -encoders | grep h264_videotoolbox    # must print a line, for WeChat
 ```
 
-Two backends use it, in opposite directions:
+Three backends use it, for three different things:
 
 - **WeChat** captures JPEG frames and transcodes them to H.264 with Apple's
   hardware encoder through ffmpeg. **Without ffmpeg it falls back to JPEG**:
@@ -64,14 +64,18 @@ Two backends use it, in opposite directions:
   The transcoder runs only while a JPEG viewer is attached; an H.264 viewer
   never starts it. Any ffmpeg build will do here — the software H.264 decoder
   and the MJPEG encoder are in every one.
+- **iOS** gets both codecs natively from serve-sim, but its JPEG comes at the
+  simulator's full pixel size — 1206x2622 on an iPhone 17 Pro, 100-700 KB a
+  picture, at whatever rate the guest redraws — and nothing upstream can turn
+  that down. ffmpeg shrinks each picture to [`--ios-max-size`](#ios-jpeg) on
+  the way through. **Without ffmpeg iOS still works**, at that full size; the
+  frame-rate cap applies either way.
 
-Both capabilities are probed at startup by actually pushing real frames
-through the real command and requiring the other codec back — a binary that
-merely lists an encoder is not enough, because a pipeline that fails at
-runtime looks identical to a working one right up until the picture never
-moves. The log says which way it went for each backend.
-
-iOS does not need ffmpeg: serve-sim produces both H.264 and JPEG natively.
+All three are probed at startup by actually pushing real frames through the
+real command and requiring the right thing back — a binary that merely lists
+an encoder is not enough, because a pipeline that fails at runtime looks
+identical to a working one right up until the picture never moves. The log
+says which way it went for each backend.
 
 ### Install
 
@@ -124,6 +128,33 @@ can be started from the client with its **Start** button.
 inherits serve-sim's platform constraints — Apple Silicon, and whichever Xcode
 versions its private-framework paths currently match. When Xcode moves those,
 the fix is `bun update serve-sim`, not a change here.
+
+#### <a id="ios-jpeg"></a>JPEG for clients without a video decoder
+
+A client that asks for `jpeg` gets serve-sim's own JPEG stream, and serve-sim
+encodes the whole framebuffer: 1206x2622 on an iPhone 17 Pro, 100-700 KB a
+picture, at whatever rate the guest redraws — 50 fps and 85 Mbit/s under a
+flicking finger, measured. A phone viewer draws that at 402x874 points and pays
+for every byte first (tens of milliseconds a frame just to get it out of the
+WebSocket), so the pixels beyond what it can show are pure waste, and there is
+no size or quality knob in the capture to turn.
+
+So the same discipline as the Android JPEG path is applied on the Mac, through
+ffmpeg, per attached JPEG stream:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--ios-max-size <px>` | `1024` | Longest side of the delivered picture; aspect kept, both sides even. A framebuffer already within it is passed through untouched. `0` disables scaling. |
+| `--ios-jpeg-max-fps <n>` | `20` | Pictures per second; anything sooner is dropped, never queued. `0` removes the cap. Applied before ffmpeg, so a dropped picture costs nothing. |
+| `--ios-jpeg-quality <1-100>` | `70` | libjpeg-style quality of the re-encoded pictures. Only pictures that were scaled are re-encoded. |
+
+At the defaults an iPhone 17 Pro goes out as 470x1024 at up to 20 fps, and
+`screen.scale` shrinks in step (3 → 1.169) so a client sizing itself as
+`width / scale` still gets the device's 402 points. `stats` on an iOS stream
+reports `frameSize` (the framebuffer) beside `videoSize` (what is sent), and
+the `streaming WxH jpeg` log line at attach says the delivered size.
+
+The H.264 path is untouched by any of this, and needs no ffmpeg.
 
 ### Android
 
@@ -352,6 +383,9 @@ Defaults: `127.0.0.1:8801`, with only the mock device.
 | `--android-jpeg-quality <1-100>` | `70` | JPEG quality of the Android JPEG path. |
 | `--android-ffmpeg <path>` | found on `$PATH` | Use a specific ffmpeg binary for the Android JPEG path. |
 | `--android-no-jpeg` | off | Stay H.264-only even when ffmpeg is usable. |
+| `--ios-max-size <px>` | `1024` | Longest edge of the iOS **JPEG** path, scaled through ffmpeg. `0` sends the framebuffer as is. See [the iOS JPEG notes](#ios-jpeg). |
+| `--ios-jpeg-max-fps <n>` | `20` | Frame cap for the iOS **JPEG** path. `0` removes it. |
+| `--ios-jpeg-quality <1-100>` | `70` | JPEG quality of scaled iOS pictures. |
 | `--wechat-max-fps <n>` | `20` | Frame cap for the WeChat **JPEG** path. `0` removes it. |
 | `--wechat-h264-max-fps <n>` | uncapped | Frame cap for the WeChat **H.264** path. |
 | `--wechat-quality <1-100>` | `70` | JPEG quality of the WeChat capture. |

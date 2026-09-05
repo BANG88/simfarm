@@ -30,7 +30,7 @@ only what a device actually has.
 
 | | iOS | Android | WeChat |
 |---|---|---|---|
-| Video | H.264 + JPEG | H.264 + JPEG (via ffmpeg) | H.264 (via ffmpeg) + JPEG |
+| Video | H.264 + JPEG (capped via ffmpeg) | H.264 + JPEG (via ffmpeg) | H.264 (via ffmpeg) + JPEG |
 | Touch, keyboard, text | yes | yes | yes |
 | Rotation | yes | yes | no |
 | Edge gestures (swipe up for home) | yes | no | no |
@@ -41,6 +41,12 @@ only what a device actually has.
 
 `mock` needs no simulator at all and is the fastest way to see whether the
 protocol and the client are working.
+
+JPEG is the codec for a client with no video decoder, and on every backend it
+is capped the same way — longest side 1024 px, 20 fps, quality 70 by default
+(`--ios-max-size`, `--android-max-size`, `--*-jpeg-max-fps`, `--*-jpeg-quality`).
+On iOS that cap needs ffmpeg; without it the pictures still arrive, at the
+simulator's full pixel size. H.264 is never capped this way.
 
 > **iOS support is [serve-sim](https://github.com/EvanBacon/serve-sim)'s work,
 > not ours.** See [Credits](#credits).

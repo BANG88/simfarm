@@ -36,6 +36,12 @@ interface ProviderTuning {
   androidNoJpeg?: boolean;
   /** --android-ffmpeg: path to the ffmpeg binary for the jpeg path */
   androidFfmpeg?: string;
+  /** --ios-max-size: longest side of a delivered jpeg picture (ios-provider.ts); 0 leaves it */
+  iosMaxSize?: number;
+  /** --ios-jpeg-max-fps: cap on the iOS jpeg path; 0 removes it */
+  iosJpegMaxFps?: number;
+  /** --ios-jpeg-quality: JPEG quality of scaled pictures, 1-100 */
+  iosJpegQuality?: number;
   /** --wechat-max-fps: 0 removes the cap (wechat-provider.ts) */
   wechatMaxFps?: number;
   /** --wechat-quality: JPEG quality, 1-100 */
@@ -58,7 +64,12 @@ const PROVIDERS: Record<string, (t: ProviderTuning) => Provider> = {
       ...(t.androidNoJpeg ? { jpeg: false } : {}),
       ...(t.androidFfmpeg ? { ffmpegPath: t.androidFfmpeg } : {}),
     }),
-  ios: () => new IosProvider(),
+  ios: (t) =>
+    new IosProvider({
+      ...(t.iosMaxSize !== undefined ? { jpegMaxSize: t.iosMaxSize } : {}),
+      ...(t.iosJpegMaxFps !== undefined ? { jpegMaxFps: t.iosJpegMaxFps } : {}),
+      ...(t.iosJpegQuality !== undefined ? { jpegQuality: t.iosJpegQuality } : {}),
+    }),
   wechat: (t) =>
     new WechatProvider({
       ...(t.wechatMaxFps !== undefined ? { maxFps: t.wechatMaxFps } : {}),
@@ -109,6 +120,12 @@ function parseArgs(argv: string[]): Args {
       args.tuning.androidFfmpeg = argv[++i];
     } else if (a === "--android-no-jpeg") {
       args.tuning.androidNoJpeg = true;
+    } else if (a === "--ios-max-size") {
+      args.tuning.iosMaxSize = intArg(argv[++i], "--ios-max-size", 0);
+    } else if (a === "--ios-jpeg-max-fps") {
+      args.tuning.iosJpegMaxFps = intArg(argv[++i], "--ios-jpeg-max-fps", 0);
+    } else if (a === "--ios-jpeg-quality") {
+      args.tuning.iosJpegQuality = intArg(argv[++i], "--ios-jpeg-quality", 1, 100);
     } else if (a === "--wechat-max-fps") {
       args.tuning.wechatMaxFps = intArg(argv[++i], "--wechat-max-fps", 0);
     } else if (a === "--wechat-h264-max-fps") {
@@ -127,6 +144,7 @@ function parseArgs(argv: string[]): Args {
           `[--providers ${Object.keys(PROVIDERS).join(",")}]\n` +
           `       [--android-max-size N] [--android-jpeg-max-fps N] [--android-jpeg-quality 1-100]\n` +
           `       [--android-no-jpeg] [--android-ffmpeg PATH]\n` +
+          `       [--ios-max-size N] [--ios-jpeg-max-fps N] [--ios-jpeg-quality 1-100]\n` +
           `       [--wechat-max-fps N] [--wechat-quality 1-100]\n` +
           `       [--wechat-no-h264] [--wechat-h264-max-fps N] [--wechat-ffmpeg PATH]\n` +
           `\n` +
