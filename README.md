@@ -125,6 +125,16 @@ file: two modules resolve paths from `import.meta.url` at different depths
 (`../web/` and `../../../vendor`), and a single-file bundle can only be right
 about one of them.
 
+### Releasing
+
+Same flow as `osuki-dev/kit`: add a changeset with each change that reaches
+npm (`bun changeset`; skip it for docs and CI). On `main`, the Release workflow
+opens a "Version Packages" PR with the bump and the changelog; merging that PR
+is the release: it publishes to npm via trusted publishing (no token in the
+repo), pushes the `v<version>` tag, and writes the GitHub release from
+`CHANGELOG.md`. Other pushes to main stop after a check. Nothing is published
+by hand.
+
 ---
 
 ## Credits
