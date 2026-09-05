@@ -35,7 +35,7 @@ and no per-backend port.
 ├───────────────┬───────────────┬─────────────────┬───────────────┤
 │  IosProvider  │ AndroidProvider│ WechatProvider  │ MockProvider  │
 │  serve-sim    │ scrcpy server  │ CDP + IDE CLI   │ synthetic     │
-│  middleware   │ protocol       │ + ffmpeg        │ frames        │
+│  middleware   │ protocol+ffmpeg│ + ffmpeg        │ frames        │
 └───────────────┴───────────────┴─────────────────┴───────────────┘
         │               │                │
    iOS Simulator     adb / AVD      WeChat DevTools
@@ -52,6 +52,7 @@ and no per-backend port.
 | `src/protocol.ts` | Wire encode/decode. Mirrored byte-for-byte by `web/protocol.js`. |
 | `src/types.ts` | `Provider`, `DeviceHandle`, `Capabilities`, `Screen`. Read this first. |
 | `src/util/h264.ts` | Annex-B ↔ avcC conversion, parameter-set extraction, shared by two backends. |
+| `src/providers/wechat/h264-encoder.ts`, `src/providers/android/jpeg-transcoder.ts` | The two ffmpeg pipelines: JPEG → H.264 for WeChat, H.264 → JPEG for Android. |
 | `src/providers/*` | One directory per backend. |
 | `web/` | The client. Plain ESM, no framework, no build step. |
 | `vendor/scrcpy-server.json` | Pinned scrcpy server version and its SHA-256. |
@@ -193,6 +194,24 @@ Sequence, in `tunnel_forward` mode, transcribed from the pinned sources in
 
 Annex-B from the device is converted to avcC in `src/util/h264.ts`: parameter
 sets become the `CONFIG` frame, IDRs become `KEY`, the rest `DELTA`.
+
+**JPEG is produced here, not by the device — the WeChat path run backwards.**
+scrcpy encodes H.264 and nothing else, which is useless to a client with no
+video decoder: a native app whose runtime cannot decode video, or a browser
+on a plain-http IP origin. `src/providers/android/jpeg-transcoder.ts` feeds
+the same Annex-B stream to `ffmpeg -f h264 … -c:v mjpeg -f image2pipe` and
+cuts the output into whole JPEGs, each sent as a `KEY` frame. It runs only
+while a jpeg stream is attached, so an h264 viewer costs nothing extra, and
+it is restarted on every encoded-size change (rotation), which scrcpy follows
+with fresh parameter sets and an IDR anyway. The capability is **probed at
+`init()`** exactly as the WeChat h264 path is: without a usable ffmpeg the
+device declares `["h264"]` only. The device declares h264 first either way,
+so the session's preference for h264 (PROTOCOL §4) is unchanged. The flags
+cost a frame of latency each if you get them wrong and are documented in the
+transcoder: an access-unit delimiter appended to every picture, because the
+raw H.264 parser cannot otherwise know a picture has ended and scrcpy sends
+nothing while the screen is still; a single decoder thread and a single
+encoder thread, because both default to frame-threaded pipelines.
 
 **The version is pinned and verified.** The scrcpy server protocol is neither
 documented nor stable across releases, so `vendor/scrcpy-server.json` records the

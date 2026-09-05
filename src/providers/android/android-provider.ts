@@ -6,14 +6,17 @@
  *   adb track-devices ──> device list ("android:<serial>")
  *   open(id) ──> AndroidHandle
  *                  startVideo ──> ScrcpySession ──> Annex-B H.264
- *                                   └─ h264.ts ──> avcC CONFIG + AVCC KEY/DELTA
+ *                                   ├─ h264.ts ──> avcC CONFIG + AVCC KEY/DELTA   (h264)
+ *                                   └─ jpeg-transcoder.ts ──> ffmpeg ──> JPEG KEY (jpeg)
  *                  input      ──> scrcpy control messages over the control socket
  *
- * Owned by the Android milestone. Shared files (protocol.ts, types.ts,
- * registry.ts, session.ts, server.ts, main.ts, web/) are frozen — nothing here
- * needed a change to them.
+ * The jpeg path exists for clients that cannot decode video at all (a native
+ * app with no decoder, a browser on a plain-http IP origin). It is probed at
+ * init() and declared only when ffmpeg can actually produce a picture; the
+ * transcoder runs only while a jpeg stream is attached, so an h264 viewer
+ * costs nothing extra.
  *
- * Registration and lifecycle are already wired in src/main.ts:
+ * Registration and lifecycle are wired in src/main.ts:
  *   --providers android  ->  new AndroidProvider(), init(ctx), then list/watch/open
  */
 
@@ -45,6 +48,12 @@ import {
   parameterSetsFromAnnexB,
 } from "../../util/h264.ts";
 import { ensureJar, loadRelease } from "./scrcpy-release.ts";
+import {
+  DEFAULT_TRANSCODER,
+  JpegTranscoder,
+  probeTranscoder,
+  type TranscoderOptions,
+} from "./jpeg-transcoder.ts";
 import {
   COPY_KEY,
   CONTROL_MSG,
@@ -115,9 +124,19 @@ const DEFAULT_MAX_SIZE = 1024;
 const DEFAULT_MAX_FPS = 60;
 const DEFAULT_BIT_RATE = 8_000_000;
 
+/**
+ * How long a jpeg stream may accept packets and produce no picture before the
+ * client is told. Generous: the first JPEG needs a keyframe, and a fresh scrcpy
+ * session always opens with one.
+ */
+const TRANSCODER_WATCHDOG_MS = 5000;
+
 /** ARCHITECTURE.md. No edge gestures (Android has none) and no a11y tree (that would
  *  need a separate uiautomator channel). */
 const CAPS: Capabilities = {
+  // Replaced at init() with ["h264", "jpeg"] when ffmpeg can transcode; see
+  // `androidCapabilities`. h264 stays first so the session keeps preferring
+  // it for clients that can decode it (PROTOCOL §4).
   video: ["h264"],
   touch: true,
   multitouch: true,
@@ -139,6 +158,18 @@ const CAPS: Capabilities = {
   boot: false,
 };
 
+/**
+ * What an Android device declares, given whether the box can transcode.
+ *
+ * Declaring jpeg without ffmpeg would make every jpeg attach fail with an
+ * ffmpeg error instead of a codec error; declaring only h264 with ffmpeg
+ * present would leave a jpeg-only client looking at nothing. So the answer is
+ * a fact about the machine, found out once at init().
+ */
+export function androidCapabilities(jpeg: boolean): Capabilities {
+  return jpeg ? { ...CAPS, video: ["h264", "jpeg"] } : CAPS;
+}
+
 /** In-band NALs that only make sense in an Annex-B stream. */
 const DROP_IN_AVCC = new Set<number>([NAL_TYPE.AUD]);
 
@@ -159,12 +190,23 @@ export interface AndroidProviderOptions {
   videoBitRate?: number;
   /** keep the screen on while a session is attached (restored on close) */
   stayAwake?: boolean;
+  /** false leaves the jpeg path off even when ffmpeg is available */
+  jpeg?: boolean;
+  /** where to find ffmpeg for the jpeg path */
+  ffmpegPath?: string;
+  /** frame cap on the jpeg path; 0 removes it */
+  jpegMaxFps?: number;
+  /** JPEG quality on the jpeg path, 1-100 */
+  jpegQuality?: number;
 }
 
 export class AndroidProvider implements Provider {
   readonly kind = "android" as const;
 
   private readonly options: AndroidProviderOptions;
+  private readonly transcoder: TranscoderOptions;
+  private readonly jpegWanted: boolean;
+  private caps: Capabilities = CAPS;
   private readonly meta = new Map<string, DeviceMeta>();
   private readonly listeners = new Set<(devices: Device[]) => void>();
   private devices: Device[] = [];
@@ -173,6 +215,12 @@ export class AndroidProvider implements Provider {
 
   constructor(options: AndroidProviderOptions = {}) {
     this.options = options;
+    this.jpegWanted = options.jpeg ?? true;
+    this.transcoder = {
+      ffmpegPath: options.ffmpegPath ?? DEFAULT_TRANSCODER.ffmpegPath,
+      maxFps: options.jpegMaxFps ?? DEFAULT_TRANSCODER.maxFps,
+      quality: options.jpegQuality ?? DEFAULT_TRANSCODER.quality,
+    };
   }
 
   async init(_ctx: ProviderContext): Promise<void> {
@@ -183,6 +231,18 @@ export class AndroidProvider implements Provider {
     const jarFile = await ensureJar(release, undefined, (m: string) => log.info(m));
     this.jar = { path: jarFile, version: release.version };
     log.info(`scrcpy-server ${release.version} verified (${jarFile})`);
+
+    if (this.jpegWanted && (await probeTranscoder(this.transcoder.ffmpegPath))) {
+      this.caps = androidCapabilities(true);
+      log.info(`jpeg available via ${this.transcoder.ffmpegPath} (h264 -> mjpeg)`);
+    } else {
+      this.caps = androidCapabilities(false);
+      log.warn(
+        this.jpegWanted
+          ? `no usable ffmpeg at "${this.transcoder.ffmpegPath}" — h264 only, so a client that can only draw JPEG will not see Android devices. brew install ffmpeg`
+          : "jpeg disabled by --android-no-jpeg — h264 only",
+      );
+    }
 
     this.devices = await this.toDevices(await listDevices().catch(() => []));
 
@@ -233,6 +293,7 @@ export class AndroidProvider implements Provider {
       serial,
       this.jar,
       this.options,
+      this.transcoder,
       this.meta.get(serial),
     );
   }
@@ -281,7 +342,7 @@ export class AndroidProvider implements Provider {
               orientation: meta.width > meta.height ? "landscape_left" : "portrait",
             }
           : undefined,
-        capabilities: CAPS,
+        capabilities: this.caps,
       });
     }
     return out;
@@ -330,6 +391,7 @@ class AndroidHandle implements DeviceHandle {
   private readonly serial: string;
   private readonly jar: { path: string; version: string };
   private readonly options: AndroidProviderOptions;
+  private readonly transcoderOptions: TranscoderOptions;
   private readonly meta: DeviceMeta | undefined;
 
   /**
@@ -351,14 +413,22 @@ class AndroidHandle implements DeviceHandle {
     bytesOut: 0,
     /** longest interval between two packets from scrcpy, ms */
     maxGapMs: 0,
+    /** times the jpeg transcoder was restarted for a resolution change */
+    transcoderRestarts: 0,
   };
   private lastPacketAt = 0;
 
   private events: HandleEvents = {};
   private session: ScrcpySession | null = null;
   private sink: FrameSink | null = null;
+  private codec: Codec = "h264";
   private avcC: Uint8Array | null = null;
   private sawConfig = false;
+  /** the jpeg path; null on an h264 stream */
+  private transcoder: JpegTranscoder | null = null;
+  /** the encoded size the running transcoder was started for */
+  private transcoderSize: VideoSize | null = null;
+  private watchdog: NodeJS.Timeout | null = null;
   private clipboardWaiters: Array<(text: string) => void> = [];
   private clipboardSeq = 1n;
   private savedRotation: { accelerometer: string; userRotation: string } | null =
@@ -370,12 +440,14 @@ class AndroidHandle implements DeviceHandle {
     serial: string,
     jar: { path: string; version: string },
     options: AndroidProviderOptions,
+    transcoderOptions: TranscoderOptions,
     meta: DeviceMeta | undefined,
   ) {
     this.device = device;
     this.serial = serial;
     this.jar = jar;
     this.options = options;
+    this.transcoderOptions = transcoderOptions;
     this.meta = meta;
   }
 
@@ -384,12 +456,22 @@ class AndroidHandle implements DeviceHandle {
   }
 
   async startVideo(codec: Codec, onFrame: FrameSink): Promise<() => void> {
-    if (codec !== "h264") {
-      throw new Error(`android provider only speaks h264, got ${codec}`);
+    if (codec !== "h264" && codec !== "jpeg") {
+      throw new Error(`android provider cannot produce ${codec}`);
+    }
+    if (codec === "jpeg" && !this.device.capabilities.video.includes("jpeg")) {
+      throw new Error(
+        `android jpeg needs ffmpeg, which was not usable at startup — brew install ffmpeg, or attach with codec "h264"`,
+      );
     }
     if (this.session) throw new Error("video already started");
 
     this.sink = onFrame;
+    this.codec = codec;
+    // Before the session: scrcpy's first packets (parameter sets, then an IDR)
+    // arrive while start() is still resolving, and the transcoder has to be
+    // there to take them — it cannot decode anything until it has both.
+    if (codec === "jpeg") this.startTranscoder();
     const session = new ScrcpySession(
       {
         serial: this.serial,
@@ -412,18 +494,85 @@ class AndroidHandle implements DeviceHandle {
       },
     );
 
-    await session.start();
+    try {
+      await session.start();
+    } catch (err) {
+      this.stopTranscoder();
+      throw err;
+    }
     this.session = session;
     // start() only resolves once the session packet has arrived, so the size is
     // authoritative by now; session.ts re-emits device.screen after attach.
     this.onVideoSize(session.videoSize);
     log.info(
-      `${this.serial}: streaming ${session.videoSize.width}x${session.videoSize.height} h264`,
+      `${this.serial}: streaming ${session.videoSize.width}x${session.videoSize.height} ${codec}`,
     );
 
     return () => {
       void this.close();
     };
+  }
+
+  /**
+   * One ffmpeg per jpeg stream, started fresh for every encoded size. The
+   * decoder itself could follow a new SPS, but ffmpeg's encoder is opened at
+   * the first picture's size and a rotated frame would come out scaled into
+   * the old shape; a restart costs a few milliseconds and an IDR, both of
+   * which scrcpy is about to spend anyway.
+   */
+  private startTranscoder(): void {
+    const transcoder = new JpegTranscoder(this.transcoderOptions, (jpeg) => {
+      if (this.closed || this.transcoder !== transcoder) return;
+      this.stats.framesOut++;
+      this.stats.bytesOut += jpeg.length;
+      this.sink?.(VIDEO_TAG.KEY, jpeg);
+    });
+    transcoder.onFailure = (reason) => {
+      if (this.closed || this.transcoder !== transcoder) return;
+      this.events.onError?.(`jpeg transcoder stopped: ${reason} — re-attach to recover`);
+    };
+    transcoder.onKeyframeNeeded = () => {
+      this.session?.send(encodeEmpty(CONTROL_MSG.RESET_VIDEO));
+    };
+    transcoder.start();
+    this.transcoder = transcoder;
+    // Recorded by the next onVideoSize, which is where the size becomes known.
+    this.transcoderSize = null;
+    this.startTranscoderWatchdog(transcoder);
+  }
+
+  private stopTranscoder(): void {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = null;
+    this.transcoder?.stop();
+    this.transcoder = null;
+    this.transcoderSize = null;
+  }
+
+  /**
+   * The failure that has to be loud, as with the WeChat encoder: the attach
+   * succeeds, packets flow in, and no picture ever comes out, with every stage
+   * individually healthy. Say what the counters say and what ffmpeg said.
+   */
+  private startTranscoderWatchdog(transcoder: JpegTranscoder): void {
+    const timer = setTimeout(() => {
+      if (this.closed || this.transcoder !== transcoder) return;
+      const s = transcoder.stats;
+      if (s.framesOut > 0 || s.packetsIn === 0) return;
+      const counts =
+        `${s.packetsIn} packets in, ${s.skippedBeforeKey} skipped before a keyframe, ` +
+        `${s.bytesIn} bytes written, ${s.stdoutBytes} bytes back`;
+      const said = transcoder.diagnostics;
+      log.warn(`jpeg transcoder produced nothing in ${TRANSCODER_WATCHDOG_MS}ms (${counts})`);
+      log.warn(said ? `ffmpeg said: ${said}` : "ffmpeg said nothing on stderr");
+      this.events.onError?.(
+        `jpeg transcoder took ${TRANSCODER_WATCHDOG_MS}ms and produced nothing (${counts})` +
+          (said ? `. ffmpeg said: ${said}` : ". ffmpeg said nothing on stderr") +
+          `. Re-attach with codec "h264", or restart the server with --android-no-jpeg.`,
+      );
+    }, TRANSCODER_WATCHDOG_MS);
+    timer.unref?.();
+    this.watchdog = timer;
   }
 
   async input(msg: InputMessage): Promise<void> {
@@ -542,7 +691,12 @@ class AndroidHandle implements DeviceHandle {
         return { mode: /yes/i.test(now) ? "dark" : "light", raw: now };
       }
       case "stats":
-        return { ...this.stats, videoSize: this.session?.videoSize ?? null };
+        return {
+          ...this.stats,
+          codec: this.codec,
+          videoSize: this.session?.videoSize ?? null,
+          transcoder: this.transcoder ? { ...this.transcoder.stats } : null,
+        };
       case "getClipboard":
         return { text: await this.getClipboard() };
       case "setClipboard": {
@@ -572,6 +726,7 @@ class AndroidHandle implements DeviceHandle {
     const session = this.session;
     this.session = null;
     this.sink = null;
+    this.stopTranscoder();
     await this.restoreRotationSettings();
     await session?.close("detached");
   }
@@ -589,6 +744,13 @@ class AndroidHandle implements DeviceHandle {
       if (gap > this.stats.maxGapMs) this.stats.maxGapMs = gap;
     }
     this.lastPacketAt = now;
+
+    if (this.transcoder) {
+      // The jpeg path: ffmpeg wants exactly what scrcpy sends, Annex-B and all.
+      // The transcoder waits for the parameter sets and a keyframe on its own.
+      this.transcoder.push(packet);
+      return;
+    }
 
     if (packet.config) {
       // MediaCodec's csd-0: SPS+PPS in Annex-B. WebCodecs wants an avcC record.
@@ -627,6 +789,24 @@ class AndroidHandle implements DeviceHandle {
 
   private onVideoSize(size: VideoSize): void {
     if (!size.width || !size.height) return;
+    if (this.transcoder) {
+      const was = this.transcoderSize;
+      if (was === null) {
+        // The size scrcpy opened with; the transcoder was started before it
+        // was known.
+        this.transcoderSize = { ...size };
+      } else if (was.width !== size.width || was.height !== size.height) {
+        // A rotation. scrcpy restarts its encoder and sends fresh parameter
+        // sets and an IDR next, which is exactly what a new ffmpeg needs.
+        this.stats.transcoderRestarts++;
+        log.info(
+          `${this.serial}: ${was.width}x${was.height} -> ${size.width}x${size.height}, restarting the jpeg transcoder`,
+        );
+        this.stopTranscoder();
+        this.startTranscoder();
+        this.transcoderSize = { ...size };
+      }
+    }
     const physical = this.meta?.width && this.meta?.height
       ? Math.max(this.meta.width, this.meta.height)
       : 0;

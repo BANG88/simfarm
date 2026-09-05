@@ -45,23 +45,33 @@ See [bun.sh](https://bun.sh) for other install methods. The repository pins
 
 Check with `node --version`.
 
-### ffmpeg — WeChat only, and only for H.264
+### ffmpeg — H.264 for WeChat, JPEG for Android
 
 ```bash
 brew install ffmpeg
-ffmpeg -encoders | grep h264_videotoolbox    # must print a line
+ffmpeg -encoders | grep h264_videotoolbox    # must print a line, for WeChat
 ```
 
-The WeChat backend captures JPEG frames and transcodes them to H.264 with
-Apple's hardware encoder through ffmpeg. **Without ffmpeg it falls back to
-JPEG**: everything still works, at roughly seven times the bandwidth. The
-capability is probed at startup by actually pushing two frames through the real
-command and requiring H.264 back — a binary that merely lists the encoder is not
-enough, because a pipeline that fails at runtime looks identical to a working
-one right up until the picture never moves.
+Two backends use it, in opposite directions:
 
-The other two backends do not need ffmpeg. iOS gets H.264 from serve-sim and
-Android from the device's own MediaCodec.
+- **WeChat** captures JPEG frames and transcodes them to H.264 with Apple's
+  hardware encoder through ffmpeg. **Without ffmpeg it falls back to JPEG**:
+  everything still works, at roughly seven times the bandwidth.
+- **Android** gets H.264 from the device's own MediaCodec and transcodes it
+  to JPEG through ffmpeg, for clients that cannot decode video at all — a
+  native app with no decoder, or a browser on a plain-http IP origin. **Without
+  ffmpeg Android is H.264-only**, and such a client sees no Android device.
+  The transcoder runs only while a JPEG viewer is attached; an H.264 viewer
+  never starts it. Any ffmpeg build will do here — the software H.264 decoder
+  and the MJPEG encoder are in every one.
+
+Both capabilities are probed at startup by actually pushing real frames
+through the real command and requiring the other codec back — a binary that
+merely lists an encoder is not enough, because a pipeline that fails at
+runtime looks identical to a working one right up until the picture never
+moves. The log says which way it went for each backend.
+
+iOS does not need ffmpeg: serve-sim produces both H.264 and JPEG natively.
 
 ### Install
 
@@ -222,6 +232,24 @@ geometry, not the encoder's workload.
 **Physical devices encode in hardware and do not have this problem.** If frame
 rate matters, use one.
 
+#### JPEG for clients without a video decoder
+
+A client that asks for `jpeg` — the bundled page does so on its own when
+`VideoDecoder` is missing, and a native viewer with no decoder can do nothing
+else — gets scrcpy's H.264 decoded and re-encoded as JPEG on the Mac, through
+ffmpeg. It needs [ffmpeg](#ffmpeg--h264-for-wechat-jpeg-for-android) and is
+declared only when the probe at startup succeeds; a client that can decode
+H.264 is unaffected and the transcoder does not run for it.
+
+The knobs mirror the WeChat JPEG path's: `--android-jpeg-max-fps` (default
+20; `0` uncaps it) because whole JPEGs have no interframe compression and cost
+several times the bandwidth of the same pictures as H.264, and
+`--android-jpeg-quality` (default 70, libjpeg-style 1-100). An emulator
+delivers 15-20 fps at the default `--android-max-size` anyway, so the cap
+mostly matters for a physical device, which would otherwise send sixty whole
+pictures a second. `--android-no-jpeg` skips the probe and stays H.264-only;
+`--android-ffmpeg` points at a specific binary.
+
 #### Physical devices
 
 Enable Developer options (tap *Build number* seven times in *About phone*), turn
@@ -320,6 +348,10 @@ Defaults: `127.0.0.1:8801`, with only the mock device.
 | <a id="-providers-list"></a>`--providers <list>` | `mock` | Comma-separated: `mock`, `ios`, `android`, `wechat`. |
 | `--no-mock` | off | Drop the mock device from whatever `--providers` selected. |
 | `--android-max-size <px>` | `1024` | Longest edge scrcpy encodes. See [the trade-off](#max-size). |
+| `--android-jpeg-max-fps <n>` | `20` | Frame cap for the Android **JPEG** path (transcoded via ffmpeg). `0` removes it. |
+| `--android-jpeg-quality <1-100>` | `70` | JPEG quality of the Android JPEG path. |
+| `--android-ffmpeg <path>` | found on `$PATH` | Use a specific ffmpeg binary for the Android JPEG path. |
+| `--android-no-jpeg` | off | Stay H.264-only even when ffmpeg is usable. |
 | `--wechat-max-fps <n>` | `20` | Frame cap for the WeChat **JPEG** path. `0` removes it. |
 | `--wechat-h264-max-fps <n>` | uncapped | Frame cap for the WeChat **H.264** path. |
 | `--wechat-quality <1-100>` | `70` | JPEG quality of the WeChat capture. |

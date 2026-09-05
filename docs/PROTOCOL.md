@@ -281,7 +281,9 @@ the server keeps streaming, frame count and bitrate both climb, and the canvas s
 works fine, so every measurement taken on this machine misses it.
 
 The client side already handles this: if `VideoDecoder` is not detected it **attaches `jpeg`** instead
-(when the device does not offer jpeg — Android, for instance — it reports a clear error rather than a black screen).
+(when the device does not offer jpeg — an Android backend running without ffmpeg — it reports a clear error rather than a black screen).
+Every backend offers jpeg on a machine with ffmpeg: iOS natively, WeChat natively, Android by transcoding
+scrcpy's H.264 on the server, so a client with no video decoder at all can draw every device.
 **The real fix is to put the server behind TLS** (`tailscale cert` can sign a real certificate for a MagicDNS
 name), after which h264 works. If you are writing your own client, take note of this one:
 without the detection you get a black canvas and a set of statistics that look perfectly normal.
