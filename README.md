@@ -30,7 +30,7 @@ only what a device actually has.
 
 | | iOS | Android | WeChat |
 |---|---|---|---|
-| Video | H.264 + JPEG | H.264 | H.264 (via ffmpeg) + JPEG |
+| Video | H.264 + JPEG | H.264 + JPEG (via ffmpeg) | H.264 (via ffmpeg) + JPEG |
 | Touch, keyboard, text | yes | yes | yes |
 | Rotation | yes | yes | no |
 | Edge gestures (swipe up for home) | yes | no | no |

@@ -28,6 +28,14 @@ const log = logger("main");
 interface ProviderTuning {
   /** --android-max-size: largest dimension scrcpy encodes (android-provider.ts) */
   androidMaxSize?: number;
+  /** --android-jpeg-max-fps: cap on the transcoded jpeg path; 0 removes it */
+  androidJpegMaxFps?: number;
+  /** --android-jpeg-quality: JPEG quality of the transcoded path, 1-100 */
+  androidJpegQuality?: number;
+  /** --android-no-jpeg: stay h264-only even if ffmpeg is available */
+  androidNoJpeg?: boolean;
+  /** --android-ffmpeg: path to the ffmpeg binary for the jpeg path */
+  androidFfmpeg?: string;
   /** --wechat-max-fps: 0 removes the cap (wechat-provider.ts) */
   wechatMaxFps?: number;
   /** --wechat-quality: JPEG quality, 1-100 */
@@ -43,7 +51,13 @@ interface ProviderTuning {
 const PROVIDERS: Record<string, (t: ProviderTuning) => Provider> = {
   mock: () => new MockProvider(),
   android: (t) =>
-    new AndroidProvider(t.androidMaxSize ? { maxSize: t.androidMaxSize } : {}),
+    new AndroidProvider({
+      ...(t.androidMaxSize ? { maxSize: t.androidMaxSize } : {}),
+      ...(t.androidJpegMaxFps !== undefined ? { jpegMaxFps: t.androidJpegMaxFps } : {}),
+      ...(t.androidJpegQuality !== undefined ? { jpegQuality: t.androidJpegQuality } : {}),
+      ...(t.androidNoJpeg ? { jpeg: false } : {}),
+      ...(t.androidFfmpeg ? { ffmpegPath: t.androidFfmpeg } : {}),
+    }),
   ios: () => new IosProvider(),
   wechat: (t) =>
     new WechatProvider({
@@ -87,6 +101,14 @@ function parseArgs(argv: string[]): Args {
       args.providers = (argv[++i] ?? "").split(",").filter(Boolean);
     } else if (a === "--android-max-size") {
       args.tuning.androidMaxSize = intArg(argv[++i], "--android-max-size", 1);
+    } else if (a === "--android-jpeg-max-fps") {
+      args.tuning.androidJpegMaxFps = intArg(argv[++i], "--android-jpeg-max-fps", 0);
+    } else if (a === "--android-jpeg-quality") {
+      args.tuning.androidJpegQuality = intArg(argv[++i], "--android-jpeg-quality", 1, 100);
+    } else if (a === "--android-ffmpeg") {
+      args.tuning.androidFfmpeg = argv[++i];
+    } else if (a === "--android-no-jpeg") {
+      args.tuning.androidNoJpeg = true;
     } else if (a === "--wechat-max-fps") {
       args.tuning.wechatMaxFps = intArg(argv[++i], "--wechat-max-fps", 0);
     } else if (a === "--wechat-h264-max-fps") {
@@ -103,7 +125,9 @@ function parseArgs(argv: string[]): Args {
       console.log(
         `usage: simfarm [--host HOST] [--port PORT] ` +
           `[--providers ${Object.keys(PROVIDERS).join(",")}]\n` +
-          `       [--android-max-size N] [--wechat-max-fps N] [--wechat-quality 1-100]\n` +
+          `       [--android-max-size N] [--android-jpeg-max-fps N] [--android-jpeg-quality 1-100]\n` +
+          `       [--android-no-jpeg] [--android-ffmpeg PATH]\n` +
+          `       [--wechat-max-fps N] [--wechat-quality 1-100]\n` +
           `       [--wechat-no-h264] [--wechat-h264-max-fps N] [--wechat-ffmpeg PATH]\n` +
           `\n` +
           `       simfarm download-scrcpy [--force]\n` +
