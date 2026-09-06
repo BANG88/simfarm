@@ -594,6 +594,34 @@ typeof VideoDecoder      // "undefined" means this is the problem
 The readout showing `jpeg` when the device offers `h264` is the same symptom
 seen from the other side.
 
+### An iOS simulator that `simctl` calls Booted cannot be attached
+
+**Symptom:** `attach` answers `simulator X cannot be captured: Error
+Domain=FrameCapture Code=2 "Device not booted (state: Shutdown)"`, the log has
+the same line, and often, a little earlier, CoreSimulator's own
+`Mach error -308 (ipc/mig) server died` / `Invalid device state`.
+
+**Cause:** the simulator's CoreSimulatorService connection died — usually a
+shutdown that raced a live stream — and `xcrun simctl list` still says
+`Booted` while CoreSimulator itself considers the device shut down. Nothing
+can capture it in that state. The server keeps running (a stream that was on
+that device ended with an `error` event, and the device is re-listed as soon
+as it is really down); the simulator is what needs resetting.
+
+**Fix:**
+
+```bash
+xcrun simctl shutdown <udid>       # then boot it again, from the client or simctl
+```
+
+If that hangs or the device comes back in the same state, restart the service
+behind every simulator (this shuts all of them down):
+
+```bash
+killall -9 com.apple.CoreSimulator.CoreSimulatorService
+xcrun simctl boot <udid>
+```
+
 ### The device list is empty
 
 Work down this list:

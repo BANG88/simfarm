@@ -46,7 +46,12 @@ import {
 } from "./jpeg-scaler.ts";
 import { MjpegParser } from "./mjpeg.ts";
 import { displayedScreen, frameRotationFor } from "./rotation.ts";
-import { loadServeSim, type SimMiddleware } from "./serve-sim.ts";
+import {
+  loadServeSim,
+  onCaptureFailure,
+  type CaptureOp,
+  type SimMiddleware,
+} from "./serve-sim.ts";
 import { simGuard } from "./sim-guard.ts";
 import { IOS_BASE, helperUrl } from "./sim-paths.ts";
 import * as simctl from "./simctl.ts";
@@ -115,12 +120,25 @@ export interface IosProviderOptions {
   jpegQuality?: number;
   /** where to find ffmpeg for the scaler */
   ffmpegPath?: string;
+  /**
+   * The simctl calls the provider enumerates with. A seam for tests that have
+   * no simulator (or want a device to change state on cue); production never
+   * sets it.
+   */
+  simctl?: IosSimctl;
+}
+
+/** The two simctl reads the provider depends on (simctl.ts has the real ones). */
+export interface IosSimctl {
+  listDevices(): Promise<simctl.SimDevice[]>;
+  deviceGeometry(deviceTypeIdentifier: string | undefined): Promise<simctl.DeviceGeometry | null>;
 }
 
 export class IosProvider implements Provider {
   readonly kind = "ios" as const;
 
   private scaler: ScalerOptions;
+  private readonly sim: IosSimctl;
   private mw: SimMiddleware | null = null;
   private baseUrl = "";
   private readonly bridge = new HidBridge();
@@ -128,6 +146,26 @@ export class IosProvider implements Provider {
   private pollTimer: NodeJS.Timeout | null = null;
   private lastFingerprint = "";
   private disposed = false;
+  private unsubscribeCapture: (() => void) | null = null;
+
+  /** every open handle, by udid — a device can be attached by several clients */
+  private readonly handles = new Map<string, Set<IosHandle>>();
+  /**
+   * Simulators serve-sim holds an in-process capture session for. serve-sim
+   * creates one on the first helper request for a udid and keeps it for the
+   * life of the process, even after the simulator shuts down; re-booted, the
+   * old session serves its last cached picture and nothing else (a re-attach
+   * gets one SEED and 0 fps, measured). So the provider remembers which udids
+   * it touched and has the session dropped once the simulator is seen down
+   * (`reconcile`).
+   */
+  private readonly sessions = new Set<string>();
+  /**
+   * udid -> why its native capture could not start, kept until the dead
+   * session is dropped. `open()` fails fast on it instead of waiting
+   * SCREEN_READY_MS for a frame that will never come.
+   */
+  private readonly captureFailures = new Map<string, string>();
 
   constructor(options: IosProviderOptions = {}) {
     this.scaler = {
@@ -136,6 +174,7 @@ export class IosProvider implements Provider {
       maxFps: options.jpegMaxFps ?? DEFAULT_SCALER.maxFps,
       quality: options.jpegQuality ?? DEFAULT_SCALER.quality,
     };
+    this.sim = options.simctl ?? simctl;
   }
 
   // -------------------------------------------------------------------------
@@ -165,9 +204,16 @@ export class IosProvider implements Provider {
 
     // Fail fast and loudly if the native addon cannot load at all — better here
     // than as a mysterious 404 on the first attach.
-    const devices = await simctl.listDevices();
+    const devices = await this.sim.listDevices();
     log.info(
       `serve-sim mounted at ${IOS_BASE}; ${devices.length} iOS simulators (${devices.filter((d) => d.state === "Booted").length} booted)`,
+    );
+
+    // Nothing here starts a capture: serve-sim only does that on the first
+    // helper request for a udid. What init() has to do is be ready for one of
+    // those to fail, whichever request it was (serve-sim.ts).
+    this.unsubscribeCapture = onCaptureFailure((udid, err, op) =>
+      this.onCaptureFailure(udid, err, op),
     );
 
     // The jpeg path does not *depend* on ffmpeg — serve-sim's pictures are
@@ -198,6 +244,8 @@ export class IosProvider implements Provider {
     this.disposed = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    this.unsubscribeCapture?.();
+    this.unsubscribeCapture = null;
     this.watchers.clear();
     await this.bridge.stop();
   }
@@ -207,8 +255,8 @@ export class IosProvider implements Provider {
   // -------------------------------------------------------------------------
 
   async list(): Promise<Device[]> {
-    const devices = await simctl.listDevices();
-    return Promise.all(devices.map((d) => toDevice(d)));
+    const devices = await this.sim.listDevices();
+    return Promise.all(devices.map((d) => toDevice(d, this.sim)));
   }
 
   watch(cb: (devices: Device[]) => void): () => void {
@@ -217,10 +265,16 @@ export class IosProvider implements Provider {
     return () => this.watchers.delete(cb);
   }
 
-  private async poll(force = false): Promise<void> {
+  /**
+   * Re-read simctl and tell the watchers when anything changed. Public so a
+   * test can drive it instead of waiting on the interval; production only ever
+   * calls it from the timer and after a boot / shutdown / capture failure.
+   */
+  async poll(force = false): Promise<void> {
     if (this.disposed || this.watchers.size === 0) return;
     try {
       const devices = await this.list();
+      await this.reconcile(devices);
       const fingerprint = devices
         .map((d) => `${d.id}:${d.state}:${d.name}`)
         .join("|");
@@ -232,29 +286,122 @@ export class IosProvider implements Provider {
     }
   }
 
+  /**
+   * A simulator we hold a session for is no longer booted: end its streams
+   * with an error the client can act on, and have serve-sim drop the dead
+   * session so the next boot gets a live one. Runs on every poll, so an
+   * `xcrun simctl shutdown` from a terminal is noticed within DEVICE_POLL_MS.
+   */
+  private async reconcile(devices: Device[]): Promise<void> {
+    const state = new Map(devices.map((d) => [udidOf(d.id), d] as const));
+    for (const udid of [...this.sessions]) {
+      const device = state.get(udid);
+      if (device?.state === "booted") continue;
+      // "connecting" is Booting: a shutdown now would abort the boot, and the
+      // stale session will still be here on the next poll, when it is either
+      // Booted (nothing to drop — see open()) or down.
+      if (device?.state === "connecting") continue;
+      const why = device ? `simulator ${device.name} is ${device.state}` : `simulator ${udid} is gone`;
+      this.failHandles(udid, why);
+      await this.dropSession(udid);
+    }
+  }
+
+  /** Native capture failed for `udid` (serve-sim.ts). Never throws. */
+  private onCaptureFailure(udid: string, err: unknown, op: CaptureOp): void {
+    const message = errorText(err);
+    log.warn(`${udid}: serve-sim capture ${op} failed: ${message}`);
+    // Only a failed start() means "no frame will ever come from this
+    // session". A subscribe or stop that rejected is logged and the stream
+    // left to its own fate: the process is safe either way, which is the
+    // part that matters.
+    if (op !== "start") return;
+    this.captureFailures.set(udid, message);
+    this.failHandles(udid, `simulator capture lost: ${message}`);
+    void this.afterCaptureFailure(udid);
+  }
+
+  private async afterCaptureFailure(udid: string): Promise<void> {
+    let device: simctl.SimDevice | undefined;
+    try {
+      device = (await this.sim.listDevices()).find((d) => d.udid === udid);
+    } catch (err) {
+      log.warn(`simctl list failed after capture failure: ${String(err)}`);
+    }
+    if (device?.state === "Booted") {
+      // simctl and CoreSimulator disagree — the "Booted" device whose
+      // CoreSimulatorService connection died ("Mach error -308 (ipc/mig)
+      // server died" in the log). Nothing we can do from here recovers it, and
+      // shutting down a device simctl calls Booted is not ours to decide, so
+      // the failure stays recorded (open() reports it) until the simulator is
+      // seen down, when reconcile() drops the session.
+      log.warn(
+        `${udid}: simctl reports ${device.name} as Booted but CoreSimulator cannot capture it — ` +
+          `run "xcrun simctl shutdown ${udid}" and boot it again; if that does not help, ` +
+          `"killall -9 com.apple.CoreSimulator.CoreSimulatorService" and boot again`,
+      );
+    } else if (device?.state !== "Booting") {
+      await this.dropSession(udid);
+    }
+    this.lastFingerprint = "";
+    await this.poll(true);
+  }
+
+  private failHandles(udid: string, reason: string): void {
+    const handles = this.handles.get(udid);
+    if (!handles) return;
+    for (const handle of [...handles]) handle.fail(reason);
+  }
+
+  /**
+   * Ask serve-sim to forget its in-process session for `udid`. The grid
+   * shutdown route is the one public route that closes a DeviceSession (it
+   * does that first, then runs `simctl shutdown`); on a simulator that is
+   * already down the simctl half fails and the route answers 500, but the
+   * session is gone by then, which is all this is for. Only ever called for a
+   * simulator that is not Booted, so nothing is shut down that was running.
+   */
+  private async dropSession(udid: string): Promise<void> {
+    const had = this.sessions.delete(udid);
+    const failed = this.captureFailures.delete(udid);
+    if (!had && !failed) return;
+    try {
+      await this.gridRequest("shutdown", udid);
+    } catch (err) {
+      log.debug(`${udid}: dropped serve-sim session (${String(err)})`);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // open / control
   // -------------------------------------------------------------------------
 
   async open(deviceId: string): Promise<DeviceHandle> {
     const udid = udidOf(deviceId);
-    const device = (await simctl.listDevices()).find((d) => d.udid === udid);
+    const device = (await this.sim.listDevices()).find((d) => d.udid === udid);
     if (!device) throw new Error(`no such iOS simulator: ${udid}`);
     if (device.state !== "Booted") {
       throw new Error(
         `simulator ${device.name} is ${device.state}; send {"op":"boot","deviceId":"${deviceId}"} first`,
       );
     }
+    const failed = this.captureFailures.get(udid);
+    if (failed) throw new Error(captureFailureMessage(device, udid, failed));
 
     // Touching /config is what creates serve-sim's capture session. Its
     // framebuffer size is only known once the first frame lands, so wait for it
     // — that also guarantees the avcc stream will carry a SEED jpeg, which is
     // the difference between "picture appears instantly" and "black until the
     // first IDR" (PROTOCOL §3).
-    const config = await this.waitForScreen(udid);
+    //
+    // Remembered before the request, not after: serve-sim creates the session
+    // whether or not this call ends well, and a session for a device that
+    // failed to capture is exactly the kind reconcile() must drop.
+    this.sessions.add(udid);
+    const config = await this.waitForScreen(udid, device);
     const hid = await this.bridge.connect(udid);
 
-    const geometry = await simctl.deviceGeometry(device.deviceTypeIdentifier);
+    const geometry = await this.sim.deviceGeometry(device.deviceTypeIdentifier);
     const geometryScale = geometry?.scale ?? 1;
     // Attaching to an already-rotated simulator has to report the rotation too,
     // not just a later rotate op — so this goes through the same helper.
@@ -264,7 +411,7 @@ export class IosProvider implements Provider {
       `opened ${device.name} (${udid}) ${screen.width}x${screen.height} ${screen.orientation} (frame ${config.width}x${config.height}, rotate ${screen.frameRotation}deg)`,
     );
 
-    return new IosHandle(
+    const handle = new IosHandle(
       {
         id: deviceId,
         kind: "ios",
@@ -279,7 +426,12 @@ export class IosProvider implements Provider {
       config,
       geometryScale,
       this.scaler,
+      () => this.handles.get(udid)?.delete(handle),
     );
+    let handles = this.handles.get(udid);
+    if (!handles) this.handles.set(udid, (handles = new Set()));
+    handles.add(handle);
+    return handle;
   }
 
   /** Provider-level ops: boot / shutdown need no open handle. */
@@ -287,18 +439,37 @@ export class IosProvider implements Provider {
     const deviceId = (args as { deviceId?: string })?.deviceId ?? "";
     const udid = udidOf(deviceId);
     switch (op) {
-      case "boot":
+      case "boot": {
+        // A session left over from the simulator's last life would serve its
+        // last picture forever; while the device is still down is the one
+        // moment it can be dropped for free.
+        await this.dropSession(udid);
         // The grid route boots via simctl *and* registers the device with
         // serve-sim's own state, which is what its `/api` surface expects.
-        return await this.gridPost("start", udid);
-      case "shutdown":
-        return await this.gridPost("shutdown", udid);
+        await this.gridRequest("start", udid);
+        this.lastFingerprint = "";
+        void this.poll(true);
+        return { ok: true };
+      }
+      case "shutdown": {
+        // End the streams before the simulator goes, whatever order the client
+        // chose: a handle still open here would keep polling /foreground, and
+        // the first of those after serve-sim drops its session would create a
+        // fresh one on a device that is going down (the crash this replaces).
+        this.failHandles(udid, "simulator shut down by request");
+        this.sessions.delete(udid);
+        this.captureFailures.delete(udid);
+        await this.gridRequest("shutdown", udid);
+        this.lastFingerprint = "";
+        void this.poll(true);
+        return { ok: true };
+      }
       default:
         throw new Error(`iOS provider does not support op "${op}"`);
     }
   }
 
-  private async gridPost(action: string, udid: string): Promise<unknown> {
+  private async gridRequest(action: "start" | "shutdown", udid: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}${IOS_BASE}/grid/api/${action}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -312,12 +483,9 @@ export class IosProvider implements Provider {
     if (!res.ok || body?.ok !== true) {
       throw new Error(body?.error ?? `grid ${action} failed (${res.status})`);
     }
-    this.lastFingerprint = "";
-    void this.poll(true);
-    return { ok: true };
   }
 
-  private async waitForScreen(udid: string): Promise<SimScreenConfig> {
+  private async waitForScreen(udid: string, device: simctl.SimDevice): Promise<SimScreenConfig> {
     const deadline = Date.now() + SCREEN_READY_MS;
     let last = "";
     for (;;) {
@@ -330,6 +498,10 @@ export class IosProvider implements Provider {
       }
       const config = (await res.json()) as SimScreenConfig;
       if (config.width > 0 && config.height > 0) return config;
+      // The capture behind this session rejected (serve-sim.ts) — no frame is
+      // coming, so say why now rather than after the deadline.
+      const failed = this.captureFailures.get(udid);
+      if (failed) throw new Error(captureFailureMessage(device, udid, failed));
       last = JSON.stringify(config);
       if (Date.now() > deadline) {
         throw new Error(`simulator ${udid} produced no frame in ${SCREEN_READY_MS}ms (last config ${last})`);
@@ -368,6 +540,8 @@ class IosHandle implements DeviceHandle {
   private codec: Codec | null = null;
   /** the jpeg cap, alive only while a jpeg stream is */
   private scaler: JpegScaler | null = null;
+  /** tells the provider this handle is gone */
+  private readonly onDispose: () => void;
 
   /**
    * The same shape of ledger the Android handle keeps, so `stats` (and
@@ -390,6 +564,7 @@ class IosHandle implements DeviceHandle {
     fb: SimScreenConfig,
     geometryScale: number,
     scalerOptions: ScalerOptions,
+    onDispose: () => void = () => {},
   ) {
     this.device = device;
     this.udid = udid;
@@ -398,6 +573,7 @@ class IosHandle implements DeviceHandle {
     this.fb = fb;
     this.geometryScale = geometryScale;
     this.scalerOptions = scalerOptions;
+    this.onDispose = onDispose;
   }
 
   subscribe(events: HandleEvents): void {
@@ -407,11 +583,26 @@ class IosHandle implements DeviceHandle {
     // it). That is the authoritative source once a session is live.
     this.hid.subscribe({
       onConfig: (config) => this.applyScreen(config),
-      onClose: () => {
-        if (!this.closed) this.events.onError?.("HID socket closed");
-      },
+      // serve-sim closes the HID sockets when it drops the device session
+      // (its grid shutdown route, or its own reaper). Input is gone and so is
+      // the capture behind the stream: end the stream rather than leave a
+      // handle polling /foreground, which would make serve-sim open a new
+      // session on a simulator that is shutting down.
+      onClose: () => this.fail("HID socket closed — serve-sim dropped the device session"),
     });
     this.startForegroundPoll();
+  }
+
+  /**
+   * The device went away under the stream (shut down, or its capture
+   * failed). PROTOCOL §6: an `error` on the stream says why, then the stream
+   * closes and the session detaches it, freeing the stream id. Idempotent.
+   */
+  fail(reason: string): void {
+    if (this.closed) return;
+    log.warn(`${this.udid}: ${reason}`);
+    this.events.onError?.(reason);
+    void this.close(reason);
   }
 
   async startVideo(codec: Codec, onFrame: FrameSink): Promise<() => void> {
@@ -589,16 +780,17 @@ class IosHandle implements DeviceHandle {
     }
   }
 
-  async close(): Promise<void> {
+  async close(reason = "closed"): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.onDispose();
     this.abort?.abort();
     this.abort = null;
     this.stopScaler();
     if (this.foregroundTimer) clearInterval(this.foregroundTimer);
     this.foregroundTimer = null;
     this.hid.close();
-    this.events.onClosed?.("closed");
+    this.events.onClosed?.(reason);
   }
 
   // -------------------------------------------------------------------------
@@ -708,8 +900,27 @@ class IosHandle implements DeviceHandle {
 // helpers
 // ---------------------------------------------------------------------------
 
-async function toDevice(d: simctl.SimDevice): Promise<Device> {
-  const geometry = await simctl.deviceGeometry(d.deviceTypeIdentifier);
+/** `Error` or not, node-swift's NSError included: the text a person should read. */
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object" && "message" in err) return String((err as { message: unknown }).message);
+  return String(err);
+}
+
+/**
+ * What `attach` answers when serve-sim's capture rejected for a device simctl
+ * still calls Booted. The NSError text is kept verbatim — it is the one line
+ * a bug report needs — followed by what to do about it.
+ */
+function captureFailureMessage(device: simctl.SimDevice, udid: string, failure: string): string {
+  return (
+    `simulator ${device.name} cannot be captured: ${failure} — ` +
+    `xcrun simctl shutdown ${udid}, then boot it again`
+  );
+}
+
+async function toDevice(d: simctl.SimDevice, sim: IosSimctl): Promise<Device> {
+  const geometry = await sim.deviceGeometry(d.deviceTypeIdentifier);
   return {
     id: `ios:${d.udid}`,
     kind: "ios",
