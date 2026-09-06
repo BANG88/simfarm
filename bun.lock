@@ -6,7 +6,7 @@
       "name": "simfarm",
       "dependencies": {
         "jpeg-js": "^0.4.4",
-        "serve-sim": "^0.1.45",
+        "serve-sim": "^0.1.46",
         "ws": "^8.21.3",
       },
       "devDependencies": {
@@ -209,7 +209,7 @@
 
     "semver": ["semver@7.8.5", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA=="],
 
-    "serve-sim": ["serve-sim@0.1.45", "", { "dependencies": { "inspect-webkit": "^0.0.5", "sonner": "^2.0.7", "ws": "^8.21.0" }, "bin": { "serve-sim": "dist/serve-sim.js" } }, "sha512-I9YBJRz7DETanzh6hRD1yaVcUPO+xe4egjGNArk22mO7SIWZVCunHVTwpAbriP7H0aZMIKfQyVpuqvYonuKxBw=="],
+    "serve-sim": ["serve-sim@0.1.46", "", { "dependencies": { "inspect-webkit": "^0.0.5", "sonner": "^2.0.7", "ws": "^8.21.0" }, "bin": { "serve-sim": "dist/serve-sim.js" } }, "sha512-zdKNOv+6qbdCkhtUMEbzX0ymrb2EJK54dZvs+n3YOK15LEcpapGA9/NpSSYEphpI420kTgUWqKNmkxLoWWaVzg=="],
 
     "shebang-command": ["shebang-command@2.0.0", "", { "dependencies": { "shebang-regex": "^3.0.0" } }, "sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA=="],
 

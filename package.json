@@ -60,7 +60,7 @@
   },
   "dependencies": {
     "jpeg-js": "^0.4.4",
-    "serve-sim": "^0.1.45",
+    "serve-sim": "^0.1.46",
     "ws": "^8.21.3"
   },
   "devDependencies": {
