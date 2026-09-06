@@ -21,9 +21,14 @@ import { AndroidProvider } from "./providers/android/android-provider.ts";
 import { IosProvider } from "./providers/ios/ios-provider.ts";
 import { WechatProvider } from "./providers/wechat/wechat-provider.ts";
 import { logger } from "./util/log.ts";
+import { installCrashGuards } from "./util/crash-guard.ts";
 import type { Provider } from "./types.ts";
 
 const log = logger("main");
+
+// Before anything can fail: one stream's unhandled rejection must never end
+// the process (util/crash-guard.ts). Listen failures still exit.
+installCrashGuards(logger("process"));
 
 interface ProviderTuning {
   /** --android-max-size: largest dimension scrcpy encodes (android-provider.ts) */

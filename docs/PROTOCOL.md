@@ -244,6 +244,11 @@ USB HID Usage Page 0x07. `hidUsage()` in `web/app.js` has a
 - `screen` is pushed after attach, after a rotation, and when the device itself reports a size change.
   **The client should size its canvas from `screen`**, rather than waiting for the first frame to decode before it learns the size.
 - `error` **does not mean the connection is gone**, only that this operation failed.
+- **A stream can end without a `detach`.** When the device goes away under it — the simulator is shut down, from the
+  client (`shutdown`) or from a terminal, or its capture fails — the server sends `error` with that `streamId` saying
+  why, then a `log` on the same stream, and the stream is gone: its id is free again, a later `detach` for it answers
+  `ok:false`, and no more VIDEO frames carry it. A `devices` event follows with the device's new `state`. The
+  connection and every other stream on it are unaffected; the way back is `boot` and a fresh `attach`.
 
 ### ⚠️ `dialog` — what the device is showing that is not in the video
 

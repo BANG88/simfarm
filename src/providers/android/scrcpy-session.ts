@@ -228,6 +228,9 @@ export class ScrcpySession {
       };
     proc.stdout?.on("data", relay("info"));
     proc.stderr?.on("data", relay("error"));
+    // A ChildProcess "error" (adb not spawnable, killed before it started)
+    // with no listener is thrown at the event loop; the stream just ends.
+    proc.on("error", (err) => this.fail(`scrcpy server: ${String(err)}`));
     proc.on("exit", (code, signal) => {
       if (this.closed) return;
       this.fail(`scrcpy server exited (code=${code} signal=${signal})`);
