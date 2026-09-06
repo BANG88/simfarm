@@ -17,28 +17,34 @@
  *
  * The capture guard
  * -----------------
- * serve-sim's in-process DeviceSession starts its native capture with
- * `this.capture.start()` and never looks at the promise (dist/middleware.js,
- * `DeviceSession.start`). The Swift side is `@NodeMethod func start() async
- * throws` (Sources/SimNative/sim-module.swift), so a device that is not booted
- * — or one CoreSimulator considers Shutdown while `simctl list` still says
- * Booted — surfaces as an unhandled rejection carrying
- * `Error Domain=FrameCapture Code=2 "Device not booted (state: Shutdown)"`,
- * and Node's default for that is to exit. One touch of `/config`,
+ * The addon's `SimCapture.start` is `@NodeMethod func start() async throws`
+ * (Sources/SimNative/sim-module.swift): on a device that is not booted — or
+ * one CoreSimulator considers Shutdown while `simctl list` still says Booted
+ * — its promise rejects with `Error Domain=FrameCapture Code=2 "Device not
+ * booted (state: Shutdown)"`. serve-sim 0.1.45's in-process `DeviceSession`
+ * called `this.capture.start()` and never looked at that promise, and Node's
+ * default for the unhandled rejection is to exit: one touch of `/config`,
  * `/foreground` or a stream route for such a device took the whole server
- * down (simfarm.log.crash-*). The same `(async () => { await
- * this.capture.subscribe… })()` shape sits in `start()` and the stream
- * handlers.
+ * down (simfarm.log.crash-*). serve-sim 0.1.46 (its PR #140) awaits the
+ * call, attaches a rejection observer of its own, answers the stream route
+ * 503 `capture_unavailable` and evicts the failed session, so the process
+ * would survive on its own now. The guard stays because the provider wants
+ * more than survival: the rejection has to reach it with the udid, so it can
+ * end the affected stream with the reason, fail a pending `attach` at once,
+ * re-list the device and drop the dead session (ios-provider.ts,
+ * onCaptureFailure). Those are the paths test/providers/ios and
+ * test/server.test.ts pin down.
  *
  * The addon exports a plain, writable `SimCapture` class, and serve-sim reads
- * it off the module object at every `new`. So before serve-sim first touches
- * it we swap in a subclass whose `start` / `subscribe` / `stop` settle their
- * promises here: the rejection is reported to the provider (which knows the
- * udid and can end the affected stream, re-list the device and drop the dead
- * session), and serve-sim sees a resolved promise, exactly as it would have on
- * a device that produces no frames. Verified against serve-sim@0.1.45; the
- * shape is asserted at load time and a mismatch only logs, because the
- * process-level guard in src/main.ts still stands behind this one.
+ * it off the module object at every `new` (dist/middleware.js, its
+ * `NativeCapture` wrapper). So before serve-sim first touches it we swap in a
+ * subclass whose `start` / `subscribe` / `stop` settle their promises here:
+ * the rejection is reported to the provider, and serve-sim sees a resolved
+ * promise, exactly as it would have on a device that produces no frames —
+ * which also keeps its own 503-and-evict path dormant behind this one.
+ * Verified against serve-sim@0.1.46; the shape is asserted at load time and a
+ * mismatch only logs, because the process-level guard in src/main.ts still
+ * stands behind this one.
  */
 
 import { createRequire } from "node:module";

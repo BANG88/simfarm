@@ -17,8 +17,9 @@
  * The exec route is easy to get wrong: `.sim` is only serve-sim's *default*
  * basePath, and we mount at `/_ios`, so the route to refuse is `/_ios/exec`
  * rather than `/_ios/.sim/exec`, and the preview UI is `/_ios` itself.
- * Verified against serve-sim@0.1.45 (`simMiddleware`:
- * `base = (options?.basePath ?? "/.sim")`, then `url === base + "/exec"`).
+ * Verified against serve-sim@0.1.46 (`simMiddleware`:
+ * `base = (options?.basePath ?? "/.sim")`, then `url === base + "/exec"` or
+ * `base + "/exec/"`).
  * Both spellings are refused here — the allowlist covers them by construction.
  */
 
