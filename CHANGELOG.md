@@ -1,5 +1,13 @@
 # simfarm
 
+## 0.3.1
+
+### Patch Changes
+
+- [#6](https://github.com/BANG88/simfarm/pull/6) [`f990f69`](https://github.com/BANG88/simfarm/commit/f990f690d66b20d23e05930774e19a127884d9b3) Thanks [@BANG88](https://github.com/BANG88)! - Shutting an iOS simulator down while a stream was attached — or attaching to one CoreSimulator considers shut down — no longer takes the whole server with it. serve-sim starts its native capture without looking at the promise, and the `FrameCapture Code=2 "Device not booted (state: Shutdown)"` it rejects with was an unhandled rejection that ended the process, every session and every other device's stream with it. The provider now guards that call: the stream on the affected device ends with an `error` event that says why, the stream id is freed, the device is re-listed as shut down, and serve-sim's dead in-process session is dropped so the next boot streams again instead of serving its last cached picture at 0 fps (which is what a re-attach after a reboot got before). An `attach` on a simulator that is not booted, or whose capture cannot start, answers `ok:false` with the reason and the way out; the `shutdown` op ends the device's streams before the simulator goes, whatever order the client sends things in. A process-level guard logs any other unhandled rejection or uncaught exception with its likely source and keeps serving; only a failure to bind the listening socket still exits. Android: a scrcpy process that cannot be spawned ends its stream instead of throwing at the event loop.
+
+- [#8](https://github.com/BANG88/simfarm/pull/8) [`18295a5`](https://github.com/BANG88/simfarm/commit/18295a5e31d269ec4e99d5785762ecc54462e0bf) Thanks [@BANG88](https://github.com/BANG88)! - serve-sim 0.1.45 -> 0.1.46 (upstream PR [#140](https://github.com/BANG88/simfarm/issues/140), "restore Xcode 27 Device Hub streaming and input"). On Xcode 27 the native capture now picks the simulator's own framebuffer instead of the larger Device Hub presentation surface that made VideoToolbox fail with `encodingFailed`, browser keyboard events reach iOS 27 through a guarded Device Hub route (opt out with `SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD=1`; Xcode 26 and older keep the HID path simfarm's input uses), and `simctl bootstatus` is no longer called with a redundant `-b` that could block after boot. serve-sim's in-process session also awaits its native capture start now, answers a stream route 503 and evicts the failed session instead of dropping the promise; simfarm's own capture guard stays in front of that so a failed capture still ends the affected stream with the reason, re-lists the device and drops the dead session. No simfarm behaviour changes on Xcode 26.
+
 ## 0.3.0
 
 ### Minor Changes
