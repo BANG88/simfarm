@@ -15,15 +15,25 @@ this is the complete one.
 
 ## 1. Prerequisites
 
-### macOS on Apple Silicon
+### Operating system
 
-Not a preference. The iOS backend mounts
-[serve-sim](https://github.com/EvanBacon/serve-sim), which loads Xcode's private
-`CoreSimulator` and `SimulatorKit` frameworks through a native addon — so it
-runs where Xcode runs and nowhere else. The Android and WeChat backends have no
-such constraint in principle, but the server is only built and tested on macOS.
+| Backend | macOS | Linux | Windows |
+|---|---|---|---|
+| iOS | Apple Silicon only | — | — |
+| Android | yes | yes | yes |
+| WeChat | yes | — | yes |
 
-macOS 14 or newer is a safe floor; anything that can run a current Xcode will do.
+The iOS backend mounts [serve-sim](https://github.com/EvanBacon/serve-sim),
+which loads Xcode's private `CoreSimulator` and `SimulatorKit` frameworks
+through a native addon — so it runs where Xcode runs and nowhere else. macOS 14
+or newer is a safe floor; anything that can run a current Xcode will do. WeChat
+devtools ship for macOS and Windows only. Android is adb, a jar and ffmpeg,
+which exist everywhere.
+
+`simfarm --providers ios` on a machine that cannot run it is refused at startup
+with a message saying so, rather than failing later inside the native addon.
+The server itself is developed and tested on macOS; Linux and Windows get the
+Android and WeChat backends on a best-effort basis.
 
 ### bun
 
@@ -168,8 +178,10 @@ adb version
 
 simfarm looks for `adb` in this order: `$ADB_PATH`,
 `$ANDROID_SDK_ROOT/platform-tools/adb`, `$ANDROID_HOME/platform-tools/adb`,
-`~/Library/Android/sdk/platform-tools/adb`, then `$PATH`. Set one of those if
-your SDK lives somewhere unusual:
+Android Studio's default SDK location, then `$PATH`. The default is
+`~/Library/Android/sdk` on macOS, `~/Android/Sdk` on Linux and
+`%LOCALAPPDATA%\Android\Sdk` on Windows (`adb.exe` there). Set one of the
+variables if your SDK lives somewhere unusual:
 
 ```bash
 export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
@@ -295,7 +307,9 @@ An unauthorized device shows in simfarm as `error` rather than as connectable.
 ### WeChat
 
 **Needs:** [WeChat DevTools](https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html)
-installed at `/Applications/wechatwebdevtools.app`, and a mini program project.
+installed in its default location (`/Applications/wechatwebdevtools.app` on
+macOS, `C:\Program Files (x86)\Tencent\微信web开发者工具` on Windows — or set
+`WECHAT_DEVTOOLS_PATH`), and a mini program project.
 
 #### Launch flags — all three are required
 
@@ -308,6 +322,12 @@ open -a /Applications/wechatwebdevtools.app --args \
   --remote-debugging-port=9222 \
   --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding
+```
+
+On Windows, run the IDE's exe with the same three flags:
+
+```bat
+"C:\Program Files (x86)\Tencent\微信web开发者工具\微信开发者工具.exe" --remote-debugging-port=9222 --disable-backgrounding-occluded-windows --disable-renderer-backgrounding
 ```
 
 | Flag | What it is for |
@@ -401,6 +421,7 @@ Defaults: `127.0.0.1:8801`, with only the mock device.
 | `SIMFARM_LOG` | `debug` \| `info` \| `warn` \| `error`. Default `info`. |
 | `SIMFARM_WECHAT_SYNC_MS` | Backstop poll interval for WeChat route tracking, ms. Default 5000. Rarely worth changing. |
 | `ADB_PATH`, `ANDROID_SDK_ROOT`, `ANDROID_HOME` | Where to find `adb`. |
+| `WECHAT_DEVTOOLS_PATH` | Where WeChat devtools is installed, if not the default (`/Applications/wechatwebdevtools.app`; `C:\Program Files (x86)\Tencent\微信web开发者工具` on Windows). |
 | `ANDROID_ADB_SERVER_ADDRESS`, `ANDROID_ADB_SERVER_PORT` | A non-default adb server. |
 
 ### Enabling a subset, and why you should

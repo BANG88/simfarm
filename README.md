@@ -55,7 +55,9 @@ simulator's full pixel size. H.264 is never capped this way.
 
 ## Quickstart
 
-Requires **macOS on Apple Silicon**, [bun](https://bun.sh), and Node 22+.
+Requires [bun](https://bun.sh) and Node 22+. The iOS backend needs **macOS on
+Apple Silicon**; Android runs on macOS, Linux and Windows; WeChat on macOS and
+Windows (the two platforms the devtools ship for).
 
 ```bash
 git clone https://github.com/BANG88/simfarm.git
