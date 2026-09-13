@@ -20,6 +20,7 @@
  *   --providers android  ->  new AndroidProvider(), init(ctx), then list/watch/open
  */
 
+import path from "node:path";
 import { logger } from "../../util/log.ts";
 import {
   BUTTON_NAME_BY_ID,
@@ -30,6 +31,7 @@ import {
 import {
   getprop,
   listDevices,
+  sdkRoots,
   shell,
   trackDevices,
   type AdbDevice,
@@ -239,7 +241,7 @@ export class AndroidProvider implements Provider {
       this.caps = androidCapabilities(false);
       log.warn(
         this.jpegWanted
-          ? `no usable ffmpeg at "${this.transcoder.ffmpegPath}" — h264 only, so a client that can only draw JPEG will not see Android devices. brew install ffmpeg`
+          ? `no usable ffmpeg at "${this.transcoder.ffmpegPath}" — h264 only, so a client that can only draw JPEG will not see Android devices. Install ffmpeg (brew / apt / winget) or point --android-ffmpeg at one`
           : "jpeg disabled by --android-no-jpeg — h264 only",
       );
     }
@@ -307,7 +309,7 @@ export class AndroidProvider implements Provider {
         // real phone cannot be booted at all. Say so instead of pretending.
         throw new Error(
           `cannot boot ${serial} from adb — start the AVD with ` +
-            `"~/Library/Android/sdk/emulator/emulator -avd <name>"`,
+            `"${path.join(sdkRoots()[0]!, "emulator", "emulator")} -avd <name>"`,
         );
       case "shutdown":
         await shell(serial, "reboot -p").catch(() => {});

@@ -59,31 +59,79 @@ interface ProviderTuning {
   wechatH264MaxFps?: number;
 }
 
-const PROVIDERS: Record<string, (t: ProviderTuning) => Provider> = {
-  mock: () => new MockProvider(),
-  android: (t) =>
-    new AndroidProvider({
-      ...(t.androidMaxSize ? { maxSize: t.androidMaxSize } : {}),
-      ...(t.androidJpegMaxFps !== undefined ? { jpegMaxFps: t.androidJpegMaxFps } : {}),
-      ...(t.androidJpegQuality !== undefined ? { jpegQuality: t.androidJpegQuality } : {}),
-      ...(t.androidNoJpeg ? { jpeg: false } : {}),
-      ...(t.androidFfmpeg ? { ffmpegPath: t.androidFfmpeg } : {}),
-    }),
-  ios: (t) =>
-    new IosProvider({
-      ...(t.iosMaxSize !== undefined ? { jpegMaxSize: t.iosMaxSize } : {}),
-      ...(t.iosJpegMaxFps !== undefined ? { jpegMaxFps: t.iosJpegMaxFps } : {}),
-      ...(t.iosJpegQuality !== undefined ? { jpegQuality: t.iosJpegQuality } : {}),
-    }),
-  wechat: (t) =>
-    new WechatProvider({
-      ...(t.wechatMaxFps !== undefined ? { maxFps: t.wechatMaxFps } : {}),
-      ...(t.wechatQuality !== undefined ? { quality: t.wechatQuality } : {}),
-      ...(t.wechatNoH264 ? { h264: false } : {}),
-      ...(t.wechatFfmpeg ? { ffmpegPath: t.wechatFfmpeg } : {}),
-      ...(t.wechatH264MaxFps !== undefined ? { h264MaxFps: t.wechatH264MaxFps } : {}),
-    }),
+/**
+ * Where each backend can run. `undefined` means anywhere Node runs.
+ *
+ * iOS is bound to macOS by serve-sim's native addon (Xcode's private
+ * CoreSimulator/SimulatorKit frameworks). WeChat devtools ships for macOS and
+ * Windows only. Android is adb + a jar + ffmpeg, all of which exist everywhere.
+ */
+type Platform = NodeJS.Platform;
+
+interface ProviderEntry {
+  make: (t: ProviderTuning) => Provider;
+  platforms?: readonly Platform[];
+}
+
+const PROVIDERS: Record<string, ProviderEntry> = {
+  mock: { make: () => new MockProvider() },
+  android: {
+    make: (t) =>
+      new AndroidProvider({
+        ...(t.androidMaxSize ? { maxSize: t.androidMaxSize } : {}),
+        ...(t.androidJpegMaxFps !== undefined ? { jpegMaxFps: t.androidJpegMaxFps } : {}),
+        ...(t.androidJpegQuality !== undefined ? { jpegQuality: t.androidJpegQuality } : {}),
+        ...(t.androidNoJpeg ? { jpeg: false } : {}),
+        ...(t.androidFfmpeg ? { ffmpegPath: t.androidFfmpeg } : {}),
+      }),
+  },
+  ios: {
+    platforms: ["darwin"],
+    make: (t) =>
+      new IosProvider({
+        ...(t.iosMaxSize !== undefined ? { jpegMaxSize: t.iosMaxSize } : {}),
+        ...(t.iosJpegMaxFps !== undefined ? { jpegMaxFps: t.iosJpegMaxFps } : {}),
+        ...(t.iosJpegQuality !== undefined ? { jpegQuality: t.iosJpegQuality } : {}),
+      }),
+  },
+  wechat: {
+    platforms: ["darwin", "win32"],
+    make: (t) =>
+      new WechatProvider({
+        ...(t.wechatMaxFps !== undefined ? { maxFps: t.wechatMaxFps } : {}),
+        ...(t.wechatQuality !== undefined ? { quality: t.wechatQuality } : {}),
+        ...(t.wechatNoH264 ? { h264: false } : {}),
+        ...(t.wechatFfmpeg ? { ffmpegPath: t.wechatFfmpeg } : {}),
+        ...(t.wechatH264MaxFps !== undefined ? { h264MaxFps: t.wechatH264MaxFps } : {}),
+      }),
+  },
 };
+
+const PLATFORM_NAMES: Partial<Record<Platform, string>> = {
+  darwin: "macOS",
+  win32: "Windows",
+  linux: "Linux",
+};
+
+function platformName(p: Platform): string {
+  return PLATFORM_NAMES[p] ?? p;
+}
+
+/** The reason `name` cannot run here, or `undefined` if it can. */
+function providerUnavailable(
+  name: string,
+  platform: Platform = process.platform,
+): string | undefined {
+  const entry = PROVIDERS[name];
+  if (!entry?.platforms || entry.platforms.includes(platform)) return undefined;
+  const where = entry.platforms.map(platformName).join(" or ");
+  return `provider "${name}" needs ${where}; this is ${platformName(platform)}`;
+}
+
+/** The providers that can run on `platform`, for the usage line. */
+function availableProviders(platform: Platform = process.platform): string[] {
+  return Object.keys(PROVIDERS).filter((n) => !providerUnavailable(n, platform));
+}
 
 const DEFAULT_PROVIDERS = ["mock"];
 
@@ -146,7 +194,7 @@ function parseArgs(argv: string[]): Args {
     } else if (a === "--help" || a === "-h") {
       console.log(
         `usage: simfarm [--host HOST] [--port PORT] ` +
-          `[--providers ${Object.keys(PROVIDERS).join(",")}]\n` +
+          `[--providers ${availableProviders().join(",")}]\n` +
           `       [--android-max-size N] [--android-jpeg-max-fps N] [--android-jpeg-quality 1-100]\n` +
           `       [--android-no-jpeg] [--android-ffmpeg PATH]\n` +
           `       [--ios-max-size N] [--ios-jpeg-max-fps N] [--ios-jpeg-quality 1-100]\n` +
@@ -166,6 +214,10 @@ function parseArgs(argv: string[]): Args {
       throw new Error(
         `unknown provider "${name}" (have: ${Object.keys(PROVIDERS).join(", ")})`,
       );
+    }
+    const why = providerUnavailable(name);
+    if (why) {
+      throw new Error(`${why} (available here: ${availableProviders().join(", ")})`);
     }
   }
   if (!Number.isInteger(args.port) || args.port <= 0 || args.port > 65535) {
@@ -214,7 +266,7 @@ async function main(): Promise<void> {
   registry.onProviderError = (kind, err) =>
     log.warn(`provider ${kind} failed: ${String(err)}`);
 
-  const providers = args.providers.map((name) => PROVIDERS[name]!(args.tuning));
+  const providers = args.providers.map((name) => PROVIDERS[name]!.make(args.tuning));
 
   const server = new SimfarmServer({
     host: args.host,

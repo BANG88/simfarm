@@ -32,17 +32,41 @@ export interface AdbDevice {
 
 let cachedAdbPath: string | null = null;
 
+/**
+ * Where Android Studio installs the SDK when nobody says otherwise. Exported for
+ * the hints that tell a human where to find the emulator binary.
+ */
+export function defaultSdkRoot(platform = process.platform, env = process.env): string {
+  switch (platform) {
+    case "darwin":
+      return path.join(os.homedir(), "Library", "Android", "sdk");
+    case "win32":
+      return path.join(
+        env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
+        "Android",
+        "Sdk",
+      );
+    default:
+      return path.join(os.homedir(), "Android", "Sdk");
+  }
+}
+
+/** SDK roots to look in, most specific first: $ANDROID_SDK_ROOT, $ANDROID_HOME, the default. */
+export function sdkRoots(platform = process.platform, env = process.env): string[] {
+  return [env.ANDROID_SDK_ROOT, env.ANDROID_HOME, defaultSdkRoot(platform, env)].filter(
+    (p): p is string => Boolean(p),
+  );
+}
+
+const EXE = process.platform === "win32" ? ".exe" : "";
+
 /** Locate the adb binary: $ADB_PATH, then the SDK roots, then $PATH. */
 export function adbPath(): string {
   if (cachedAdbPath) return cachedAdbPath;
 
   const candidates = [
     process.env.ADB_PATH,
-    process.env.ANDROID_SDK_ROOT &&
-      path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb"),
-    process.env.ANDROID_HOME &&
-      path.join(process.env.ANDROID_HOME, "platform-tools", "adb"),
-    path.join(os.homedir(), "Library", "Android", "sdk", "platform-tools", "adb"),
+    ...sdkRoots().map((root) => path.join(root, "platform-tools", `adb${EXE}`)),
   ].filter((p): p is string => Boolean(p));
 
   for (const candidate of candidates) {

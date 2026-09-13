@@ -16,10 +16,28 @@
  * believes the window is in the background. With them, page transitions work.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import path from "node:path";
 
-export const APP_PATH = "/Applications/wechatwebdevtools.app";
-export const CLI_PATH = `${APP_PATH}/Contents/MacOS/cli`;
+/**
+ * Where the tool lives. macOS and Windows are the two builds Tencent ships;
+ * `WECHAT_DEVTOOLS_PATH` overrides the install location on either (the .app
+ * bundle on macOS, the install folder on Windows).
+ */
+const WIN32 = process.platform === "win32";
+
+export const APP_PATH =
+  process.env.WECHAT_DEVTOOLS_PATH ??
+  (WIN32
+    ? "C:\\Program Files (x86)\\Tencent\\微信web开发者工具"
+    : "/Applications/wechatwebdevtools.app");
+
+export const CLI_PATH = WIN32
+  ? path.join(APP_PATH, "cli.bat")
+  : `${APP_PATH}/Contents/MacOS/cli`;
+
+/** The executable that starts the IDE itself (macOS goes through `open` instead). */
+const WIN_EXE = path.join(APP_PATH, "微信开发者工具.exe");
 
 /**
  * Flags the tool must be started with.
@@ -37,7 +55,9 @@ export function launchArgs(debugPort: number): string[] {
 
 /** The command a human should run when the tool is up but not debuggable. */
 export function launchHint(debugPort: number): string {
-  return `open -a ${APP_PATH} --args ${launchArgs(debugPort).join(" ")}`;
+  return WIN32
+    ? `"${WIN_EXE}" ${launchArgs(debugPort).join(" ")}`
+    : `open -a ${APP_PATH} --args ${launchArgs(debugPort).join(" ")}`;
 }
 
 function run(
@@ -46,10 +66,18 @@ function run(
   timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    // Node refuses to spawn a .bat without a shell (CVE-2024-27980), and
+    // `cli.bat` is all Windows ships; with a shell the path must be quoted.
+    const viaShell = WIN32 && file.toLowerCase().endsWith(".bat");
     execFile(
-      file,
+      viaShell ? `"${file}"` : file,
       args,
-      { encoding: "utf-8", timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
+      {
+        encoding: "utf-8",
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        ...(viaShell ? { shell: true } : {}),
+      },
       (err, stdout, stderr) => {
         if (err) {
           reject(new Error(stderr?.trim() || stdout?.trim() || err.message));
@@ -64,6 +92,14 @@ function run(
 /** Is a devtools process running at all? */
 export async function isToolRunning(): Promise<boolean> {
   try {
+    if (WIN32) {
+      const { stdout } = await run(
+        "tasklist",
+        ["/FI", `IMAGENAME eq ${path.basename(WIN_EXE)}`, "/NH"],
+        4000,
+      );
+      return stdout.includes(path.basename(WIN_EXE));
+    }
     // The main process is the one holding package.nw; the crash handler and the
     // launcher daemon linger after a quit and must not be mistaken for it.
     const { stdout } = await run("/usr/bin/pgrep", ["-f", "package.nw"], 4000);
@@ -80,6 +116,17 @@ export async function isToolRunning(): Promise<boolean> {
  */
 export async function launchTool(debugPort: number): Promise<void> {
   if (await isToolRunning()) return;
+  if (WIN32) {
+    // No `open` equivalent that returns once the app is up: start the exe
+    // detached and let `probe` (wechat-provider.ts) wait for the debug port.
+    const proc = spawn(WIN_EXE, launchArgs(debugPort), { detached: true, stdio: "ignore" });
+    await new Promise<void>((resolve, reject) => {
+      proc.once("spawn", resolve);
+      proc.once("error", reject);
+    });
+    proc.unref();
+    return;
+  }
   await run("/usr/bin/open", ["-a", APP_PATH, "--args", ...launchArgs(debugPort)], 20_000);
 }
 

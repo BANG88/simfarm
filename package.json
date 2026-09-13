@@ -27,12 +27,6 @@
     "devtools",
     "macos"
   ],
-  "os": [
-    "darwin"
-  ],
-  "cpu": [
-    "arm64"
-  ],
   "engines": {
     "node": ">=20"
   },
